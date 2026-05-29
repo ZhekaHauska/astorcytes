@@ -1,6 +1,9 @@
 import argparse
+import random
 import yaml
 import json
+
+import names_generator
 
 from astrocites.experiment import run_experiment
 from astrocites.logs import get_logger
@@ -67,10 +70,18 @@ def main():
     if args.num_cycles is not None:
         config["num_cycles"] = args.num_cycles
 
+    run_name = names_generator.generate_name()
+    config["run_name"] = run_name
+
+    exp_cfg = config.setdefault("experiment", {})
+    if "seeds" not in exp_cfg:
+        num_exp = exp_cfg.get("num_experiments", config.get("num_experiments", 5))
+        exp_cfg["seeds"] = [random.randint(0, 2**31 - 1) for _ in range(num_exp)]
+
     logger = get_logger(
         logger_type=args.logger,
         output_dir=config.get("output_dir", "results"),
-        experiment_name=f"grid{config['grid_size']}_{config.get('experiment_name', 'run')}",
+        experiment_name=f"grid{config['grid_size']}_{config.get('experiment_name', 'run')}_{run_name}",
     )
 
     print("START OF EXPERIMENT SERIES")

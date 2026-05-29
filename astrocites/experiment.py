@@ -1,4 +1,5 @@
 import os
+import random
 import numpy as np
 import torch
 import scipy.io as sio
@@ -135,6 +136,15 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
         print(f"\nEXPERIMENT {experiment_num}/{num_experiments}")
         print("-" * 20)
 
+        seeds = exp_cfg.get("seeds", [])
+        if seeds and exp_idx < len(seeds):
+            seed = seeds[exp_idx]
+        else:
+            seed = random.randint(0, 2**31 - 1)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
         weights_rand_dist_XY = np.random.normal(0.65, 0.1, size=(NA, NA))
         weights_rand_dist_XY[weights_rand_dist_XY > 0.8] = 0.8
         weights_rand_dist_XY[weights_rand_dist_XY < 0.5] = 0.5
@@ -214,7 +224,7 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                 metrics[f"exp{experiment_num}.astro_route_length"] = len(positions_astro) - 1
             logger.log_metrics(metrics, step=cycle_num)
 
-        results_dir = os.path.join(config.get("output_dir", "results"), f"experiment_{experiment_num}")
+        results_dir = os.path.join(str(logger.exp_dir), f"experiment_{experiment_num}")
         os.makedirs(results_dir, exist_ok=True)
 
         weights_filename = os.path.join(results_dir, "weight_matrices.txt")
@@ -247,9 +257,6 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
         sio.savemat(mat_filename, {'weight_matrices': np.array(all_weight_matrices)})
         lengths_mat_filename = os.path.join(results_dir, "route_lengths.mat")
         sio.savemat(lengths_mat_filename, {'route_lengths': np.array(route_lengths)})
-
-        logger.log_artifact(weights_filename)
-        logger.log_artifact(routes_filename)
 
         all_experiment_results.append({
             "experiment_num": experiment_num,

@@ -3,7 +3,7 @@ experiment_name: "default"
 grid_size: 3
 start_position: 4
 goal_position: 6
-n_steps: 101
+n_steps: 10
 
 neuron:
   learning_rate: 1
@@ -26,8 +26,9 @@ simulation:
   dt: 1
 
 experiment:
-  num_experiments: 5
-  num_cycles: 20
+  num_experiments: 2
+#  seeds: [42, 223]
+  num_cycles: 2
 
 output_dir: "results"
 logger_type: "file"

@@ -8,6 +8,7 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "pyyaml>=6.0",
+    "names-generator>=0.1",
 ]
 
 [project.optional-dependencies]
