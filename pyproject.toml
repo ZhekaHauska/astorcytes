@@ -1,0 +1,30 @@
+[project]
+name = "astrocites"
+version = "0.1.0"
+description = "Spiking neural network navigation with astrocyte modulation"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+comet = ["comet-ml>=3.0"]
+aim = ["aim>=3.0"]
+dev = ["pytest>=7.0", "ruff>=0.1"]
+
+[project.scripts]
+astrocites = "astrocites.run:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["astrocites"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"

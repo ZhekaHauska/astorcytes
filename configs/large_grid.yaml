@@ -1,0 +1,33 @@
+experiment_name: "large_grid"
+
+grid_size: 5
+start_position: 12
+goal_position: 24
+n_steps: 201
+
+neuron:
+  learning_rate: 1
+  wmin: 0.001
+  wmax: 1
+  weight_decay: 0
+  post_spike_weight_decay: 0.005
+  reset: 0
+  refrac: 40
+  thresh: 7
+
+astrocyte:
+  enable: true
+  alpha: 0.001
+  k: 0.2
+
+simulation:
+  intensity: 15.0
+  time_steps: 1000
+  dt: 1
+
+experiment:
+  num_experiments: 3
+  num_cycles: 15
+
+output_dir: "results_large"
+logger_type: "file"
