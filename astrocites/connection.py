@@ -31,6 +31,8 @@ class Connection(torch.nn.Module):
         self.invert = invert
         self.register_buffer("a_pre", torch.zeros(source.n))
         self.register_buffer("impulse_state", torch.zeros(source.n))
+        self.register_buffer("eligibility", torch.zeros(source.n, target.n))
+        self.register_buffer("reward_signal", torch.tensor(0.0))
 
     def impulse_curve(self):
         k = self.impulse_shape_factor
@@ -67,6 +69,23 @@ class Connection(torch.nn.Module):
 
     def update(self, **kwargs):
         self.update_rule.update(**kwargs)
+
+    def accumulate_eligibility(self, s_idx, adj_positions, probs, chosen_a, delta):
+        for i, a in enumerate(adj_positions):
+            indicator = 1.0 if a == chosen_a else 0.0
+            self.eligibility[s_idx, a] += (indicator - probs[i].item()) * delta[s_idx, a]
+
+    def apply_reinforce_update(self, lr):
+        self.w.data += lr * self.reward_signal * self.eligibility
+        self.eligibility.zero_()
+        self.reward_signal.fill_(0.0)
+
+    def set_reward(self, value):
+        self.reward_signal.fill_(value)
+
+    def reset_eligibility(self):
+        self.eligibility.zero_()
+        self.reward_signal.fill_(0.0)
 
     def reset_(self):
         self.a_pre.zero_()

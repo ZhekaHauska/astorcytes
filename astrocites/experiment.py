@@ -56,7 +56,6 @@ def setup_and_run_simulation(
         for j in range(NA):
             if weights_mask_XY[current_position, j] > 0 and j != current_position:
                 adjacent_positions.append(j)
-        weights_before = network.connections['X_Y'].w.detach().clone()
         input_data = torch.zeros(1, NA)
         input_data[0, current_position] = intensity
         sample = next(bernoulli_loader(data=(input_data / time_steps) * dt, time=time_steps)).float()
@@ -73,15 +72,6 @@ def setup_and_run_simulation(
         candidates = np.where((summed == max_val) & (weights_mask_XY[current_position, :] == 1))[0]
         candidates = [c for c in candidates if c != current_position]
         new_position = np.random.choice(candidates)
-        delta = network.connections['X_Y'].w.detach().clone() - weights_before
-        modulated_delta = delta.clone()
-        for adj in adjacent_positions:
-            if adj == new_position:
-                coef = 1.5
-            else:
-                coef = 1.0
-            modulated_delta[current_position, adj] = delta[current_position, adj] * coef
-        network.connections['X_Y'].w.data = weights_before + modulated_delta
         network.connections['X_Y'].w.data *= torch.Tensor(weights_mask_XY).float()
         weights_2d = network.connections['X_Y'].w.detach().cpu().numpy()
         current_position = new_position
@@ -89,6 +79,104 @@ def setup_and_run_simulation(
     elapsed = t() - start
     if logger is not None:
         logger.log_metrics({"elapsed_time": elapsed, "steps_taken": len(positions), "reached_goal": current_position == goal})
+    return positions, weights_2d
+
+
+def setup_and_run_simulation_reinforce(
+    NA, weights_mask_XY, weights_init_XY, weights_init_XI, n_steps,
+    current_position, goal, learning_rate, wmin, wmax, weight_decay,
+    post_spike_weight_decay, reset, refrac, thresh, intensity, time_steps, dt,
+    enable_astrocyte, alpha, k,
+    reinforce_lr, temperature, reward_goal, step_penalty,
+    logger=None,
+):
+    network = Network(dt=dt)
+    input_layer = Input(n=NA, traces=True, thresh=thresh, rest=reset, reset=reset, refrac=refrac)
+    output_layer = LIFNodes(n=NA, traces=True, thresh=thresh * torch.ones(NA), rest=reset, reset=reset, refrac=refrac)
+    inhibitor_layer = LIFNodes(n=NA, traces=True, thresh=thresh * torch.ones(NA), rest=reset, reset=reset, refrac=refrac, dt=dt,
+                               enable_astrocyte=enable_astrocyte, alpha=alpha, k=k)
+    conn_XY = Connection(input_layer, output_layer, impulse_amplitude=0.5, impulse_amplitude_2=0.5,
+                         impulse_length=40, impulse_shape_factor=0.9, invert=True,
+                         update_rule=WeightDependentPostPre, w=weights_init_XY, nu=[10, 10],
+                         wmin=wmin, wmax=wmax, weight_decay=weight_decay,
+                         post_spike_weight_decay=post_spike_weight_decay)
+    conn_XI = Connection(input_layer, inhibitor_layer, impulse_amplitude=0.5, impulse_amplitude_2=0.5,
+                         impulse_length=40, impulse_shape_factor=0.9, invert=True, update_rule=NoOp,
+                         w=weights_init_XI, nu=[learning_rate, learning_rate], wmin=-100, wmax=wmax,
+                         weight_decay=0, post_spike_weight_decay=post_spike_weight_decay)
+    conn_IY = Connection(inhibitor_layer, output_layer, impulse_amplitude=0.5, impulse_amplitude_2=0.5,
+                         impulse_length=40, impulse_shape_factor=0.9, invert=True, update_rule=NoOp,
+                         w=-weights_init_XI, nu=[learning_rate, learning_rate], wmin=-100, wmax=wmax,
+                         weight_decay=0, post_spike_weight_decay=post_spike_weight_decay)
+    network.add_layer(input_layer, 'X')
+    network.add_layer(output_layer, 'Y')
+    network.add_layer(inhibitor_layer, 'I')
+    network.add_connection(conn_XY, 'X', 'Y')
+    network.add_connection(conn_XI, 'X', 'I')
+    network.add_connection(conn_IY, 'I', 'Y')
+    state_vars = ('v', 's', 'w', 'G', 'Ca') if enable_astrocyte else ('v', 's', 'w')
+    global_monitor = NetworkMonitor(network, state_vars=state_vars)
+    network.add_monitor(global_monitor, 'Network')
+
+    total_stdp_delta = torch.zeros(NA, NA)
+    network.connections['X_Y'].reset_eligibility()
+    mask_tensor = torch.Tensor(weights_mask_XY).float()
+
+    start = t()
+    positions = []
+    for i in range(n_steps):
+        positions.append(current_position)
+        if current_position == goal:
+            print("success")
+            break
+        adjacent_positions = []
+        for j in range(NA):
+            if weights_mask_XY[current_position, j] > 0 and j != current_position:
+                adjacent_positions.append(j)
+        weights_before = network.connections['X_Y'].w.detach().clone()
+        input_data = torch.zeros(1, NA)
+        input_data[0, current_position] = intensity
+        sample = next(bernoulli_loader(data=(input_data / time_steps) * dt, time=time_steps)).float()
+        inpts = {'X': sample}
+        injects_v = {'I': torch.full((NA,), 0.02)}
+        network.run(inpts=inpts, time=time_steps, injects_v=injects_v,
+                    current_position=current_position, adjacent_positions=adjacent_positions,
+                    conn_XY=conn_XY)
+        recordings = network.monitors['Network'].get()
+        spikes = np.asarray(recordings['Y']['s'])
+        summed = np.squeeze(np.sum(spikes, axis=0))
+        summed = summed + weights_mask_XY[current_position, :]
+        delta = network.connections['X_Y'].w.detach().clone() - weights_before
+        total_stdp_delta += delta
+
+        prefs = torch.tensor([summed[a] for a in adjacent_positions], dtype=torch.float32)
+        probs = torch.softmax(prefs / temperature, dim=0)
+        probs = probs / probs.sum()
+        dist = torch.distributions.Categorical(probs)
+        chosen_idx = dist.sample().item()
+        new_position = adjacent_positions[chosen_idx]
+
+        network.connections['X_Y'].accumulate_eligibility(
+            current_position, adjacent_positions, probs, new_position, delta
+        )
+
+        network.connections['X_Y'].w.data *= mask_tensor
+        current_position = new_position
+        network.reset_()
+
+    elapsed = t() - start
+    reached_goal = (current_position == goal)
+    G = reward_goal * (1.0 if reached_goal else 0.0) + step_penalty * len(positions)
+
+    network.connections['X_Y'].w.data -= total_stdp_delta
+    network.connections['X_Y'].set_reward(G)
+    network.connections['X_Y'].apply_reinforce_update(reinforce_lr)
+    network.connections['X_Y'].w.data *= mask_tensor
+
+    if logger is not None:
+        logger.log_metrics({"elapsed_time": elapsed, "steps_taken": len(positions), "reached_goal": reached_goal})
+
+    weights_2d = network.connections['X_Y'].w.detach().cpu().numpy()
     return positions, weights_2d
 
 
@@ -124,6 +212,13 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
     intensity = sim_cfg.get("intensity", config.get("intensity", 15.0))
     time_steps = sim_cfg.get("time_steps", config.get("time_steps", 1000))
     dt = sim_cfg.get("dt", config.get("dt", 1))
+
+    reinf_cfg = config.get("reinforce", {})
+    reinf_enable = reinf_cfg.get("enable", False)
+    reinf_lr = reinf_cfg.get("learning_rate", 0.01)
+    temperature = reinf_cfg.get("temperature", 1.0)
+    reward_goal = reinf_cfg.get("reward_goal", 10.0)
+    step_penalty = reinf_cfg.get("step_penalty", -0.1)
 
     exp_cfg = config.get("experiment", {})
     num_cycles = exp_cfg.get("num_cycles", config.get("num_cycles", 20))
@@ -186,15 +281,28 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                 print(f"RUN WITH ASTROCYTES {cycle_num} OUT OF {num_cycles}")
                 print(f"{'=' * 60}")
 
-                positions_astro, weights_2d_astro = setup_and_run_simulation(
-                    NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
-                    weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
-                    goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
-                    weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
-                    reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
-                    time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
-                    logger=logger,
-                )
+                if reinf_enable:
+                    positions_astro, weights_2d_astro = setup_and_run_simulation_reinforce(
+                        NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
+                        weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
+                        goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
+                        weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
+                        reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
+                        time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
+                        reinforce_lr=reinf_lr, temperature=temperature,
+                        reward_goal=reward_goal, step_penalty=step_penalty,
+                        logger=logger,
+                    )
+                else:
+                    positions_astro, weights_2d_astro = setup_and_run_simulation(
+                        NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
+                        weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
+                        goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
+                        weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
+                        reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
+                        time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
+                        logger=logger,
+                    )
                 QAZ_after_astro = weights_2d_astro * weights_mask_XY
                 all_weight_matrices.append(QAZ_after_astro.copy())
                 weights_init_XY = torch.Tensor(weights_2d_astro).float()

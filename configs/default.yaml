@@ -1,9 +1,9 @@
 experiment_name: "default"
 
-grid_size: 3
+grid_size: 5
 start_position: 4
 goal_position: 6
-n_steps: 10
+n_steps: 50
 
 neuron:
   learning_rate: 1
@@ -20,14 +20,21 @@ astrocyte:
   alpha: 0.001
   k: 0.2
 
+reinforce:
+  enable: true
+  learning_rate: 0.01
+  temperature: 1.0
+  reward_goal: 10.0
+  step_penalty: -0.1
+
 simulation:
   intensity: 15.0
   time_steps: 1000
   dt: 1
 
 experiment:
-  num_experiments: 2
-#  seeds: [42, 223]
+  num_experiments: 3
+  seeds: [42, 223]
   num_cycles: 2
 
 output_dir: "results"
