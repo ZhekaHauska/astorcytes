@@ -34,7 +34,7 @@ class ExperimentLogger(ABC):
 
 
 class FileLogger(ExperimentLogger):
-    def __init__(self, output_dir: str, experiment_name: str = None):
+    def __init__(self, output_dir: str, experiment_name: str = None, **kwargs):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

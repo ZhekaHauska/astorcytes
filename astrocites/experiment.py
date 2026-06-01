@@ -277,14 +277,26 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                 print(f"RUN WITH ASTROCYTES {cycle_num} OUT OF {num_cycles}")
                 print(f"{'=' * 60}")
 
-                positions_astro, weights_2d_astro, goal_reached, elapsed_time = setup_and_run_simulation(
-                    NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
-                    weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
-                    goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
-                    weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
-                    reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
-                    time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
-                )
+                if reinf_enable:
+                    positions_astro, weights_2d_astro, goal_reached, elapsed_time = setup_and_run_simulation_reinforce(
+                        NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
+                        weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
+                        goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
+                        weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
+                        reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
+                        time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
+                        reinforce_lr=reinf_lr, temperature=temperature,
+                        reward_goal=reward_goal, step_penalty=step_penalty,
+                    )
+                else:
+                    positions_astro, weights_2d_astro, goal_reached, elapsed_time = setup_and_run_simulation(
+                        NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
+                        weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
+                        goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
+                        weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
+                        reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
+                        time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
+                    )
                 QAZ_after_astro = weights_2d_astro * weights_mask_XY
                 all_weight_matrices.append(QAZ_after_astro.copy())
                 weights_init_XY = torch.Tensor(weights_2d_astro).float()
@@ -308,13 +320,13 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
 
             metrics = {
                 "no_astro/route_length": len(positions_no_astro) - 1,
-                "no_astro/goal_reached": goal_reached,
-                "no_astro/elapsed_time": elapsed_time
+                "no_astro/goal_reached": goal_reached_astro,
+                "no_astro/elapsed_time": elapsed_time_astro
             }
             if enable_astrocyte:
-                metrics[f"astro/route_length"] = len(positions_astro) - 1
-                metrics[f"astro/goal_reached"] = goal_reached_astro
-                metrics[f"astro/elapsed_time"] = elapsed_time_astro
+                metrics["astro/route_length"] = len(positions_astro) - 1
+                metrics["astro/goal_reached"] = goal_reached
+                metrics["astro/elapsed_time"] = elapsed_time
             logger.log_metrics(metrics, step=cycle_num)
 
         logger.start_experiment(f"experiment_{experiment_num}")
