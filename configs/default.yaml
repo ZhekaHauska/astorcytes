@@ -26,6 +26,10 @@ reinforce:
   temperature: 1.0
   reward_goal: 10.0
   step_penalty: -0.1
+  gamma: 0.99
+  baseline_decay: 0.01
+  policy_mix_beta: 0.5
+  enable_stdp_during_training: true
 
 simulation:
   intensity: 15.0

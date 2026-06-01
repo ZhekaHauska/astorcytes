@@ -7,7 +7,8 @@ class Connection(torch.nn.Module):
     def __init__(self, source, target, impulse_amplitude=0.5, impulse_amplitude_2=0.5,
                  impulse_length=40, impulse_shape_factor=0.9, invert=False,
                  update_rule=NoOp, w=None, nu=None, wmin=0, wmax=1,
-                 weight_decay=0, post_spike_weight_decay=0, **kwargs):
+                 weight_decay=0, post_spike_weight_decay=0,
+                 baseline_decay=0.01, policy_mix_beta=0.5, **kwargs):
         super().__init__()
         self.source = source
         self.target = target
@@ -23,7 +24,7 @@ class Connection(torch.nn.Module):
                 w = torch.clamp(w, self.wmin, self.wmax)
         self.w = torch.nn.Parameter(w, False)
         self.update_rule = update_rule(self, nu=nu, weight_decay=weight_decay,
-                                       post_spike_weight_decay=post_spike_weight_decay)
+                                        post_spike_weight_decay=post_spike_weight_decay)
         self.impulse_amplitude = impulse_amplitude
         self.impulse_amplitude_2 = impulse_amplitude_2
         self.impulse_length = impulse_length
@@ -31,8 +32,10 @@ class Connection(torch.nn.Module):
         self.invert = invert
         self.register_buffer("a_pre", torch.zeros(source.n))
         self.register_buffer("impulse_state", torch.zeros(source.n))
-        self.register_buffer("eligibility", torch.zeros(source.n, target.n))
-        self.register_buffer("reward_signal", torch.tensor(0.0))
+        self.baseline_decay = baseline_decay
+        self.policy_mix_beta = policy_mix_beta
+        self.running_baseline = 0.0
+        self.step_buffer = []
 
     def impulse_curve(self):
         k = self.impulse_shape_factor
@@ -70,22 +73,54 @@ class Connection(torch.nn.Module):
     def update(self, **kwargs):
         self.update_rule.update(**kwargs)
 
-    def accumulate_eligibility(self, s_idx, adj_positions, probs, chosen_a, delta):
-        for i, a in enumerate(adj_positions):
-            indicator = 1.0 if a == chosen_a else 0.0
-            self.eligibility[s_idx, a] += (indicator - probs[i].item()) * delta[s_idx, a]
+    def store_step(self, s_idx, adj_positions, probs, chosen_idx, step_reward):
+        self.step_buffer.append({
+            's_idx': s_idx,
+            'adj_positions': list(adj_positions),
+            'probs': probs.detach().clone(),
+            'chosen_idx': chosen_idx,
+            'step_reward': step_reward,
+        })
 
-    def apply_reinforce_update(self, lr):
-        self.w.data += lr * self.reward_signal * self.eligibility
-        self.eligibility.zero_()
-        self.reward_signal.fill_(0.0)
+    def compute_and_apply_reinforce_update(self, lr, gamma, temperature, mask=None):
+        T = len(self.step_buffer)
+        if T == 0:
+            return
 
-    def set_reward(self, value):
-        self.reward_signal.fill_(value)
+        rewards = [step['step_reward'] for step in self.step_buffer]
+        returns = []
+        G = 0.0
+        for r in reversed(rewards):
+            G = r + gamma * G
+            returns.insert(0, G)
 
-    def reset_eligibility(self):
-        self.eligibility.zero_()
-        self.reward_signal.fill_(0.0)
+        self.running_baseline = (1 - self.baseline_decay) * self.running_baseline + self.baseline_decay * returns[0]
+        baseline = self.running_baseline
+
+        delta_w = torch.zeros_like(self.w)
+        beta = self.policy_mix_beta
+
+        for t, step in enumerate(self.step_buffer):
+            s_idx = step['s_idx']
+            adj_positions = step['adj_positions']
+            probs = step['probs']
+            chosen_idx = step['chosen_idx']
+            advantage = returns[t] - baseline
+
+            for i, a in enumerate(adj_positions):
+                indicator = 1.0 if i == chosen_idx else 0.0
+                score = beta / temperature * (indicator - probs[i].item())
+                delta_w[s_idx, a] += advantage * score
+
+        self.w.data += lr * delta_w
+        self.w.data.clamp_(self.wmin, self.wmax)
+        if mask is not None:
+            self.w.data *= mask
+
+        self.step_buffer = []
+
+    def reset_episode(self):
+        self.step_buffer = []
 
     def reset_(self):
         self.a_pre.zero_()

@@ -85,7 +85,7 @@ class Network(torch.nn.Module):
                     inpts[tgt] += source_output
         return inpts
 
-    def run(self, inpts, time, injects_v=None, current_position=None, adjacent_positions=None, conn_XY=None, **kwargs):
+    def run(self, inpts, time, injects_v=None, current_position=None, adjacent_positions=None, conn_XY=None, enable_stdp=True, **kwargs):
         timesteps = int(time / self.dt)
         injects_v = injects_v or {}
         for t_step in range(timesteps):
@@ -111,9 +111,10 @@ class Network(torch.nn.Module):
             for connection in self.connections.values():
                 connection.target.prev_layer_s = connection.source.s
                 if connection == conn_XY:
-                    connection.update(current_position=current_position,
-                                      adjacent_positions=adjacent_positions,
-                                      learning=self.learning, **kwargs)
+                    if enable_stdp:
+                        connection.update(current_position=current_position,
+                                          adjacent_positions=adjacent_positions,
+                                          learning=self.learning, **kwargs)
                 else:
                     connection.update(learning=self.learning, **kwargs)
             for monitor in self.monitors.values():

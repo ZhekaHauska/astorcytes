@@ -86,7 +86,9 @@ def setup_and_run_simulation_reinforce(
     current_position, goal, learning_rate, wmin, wmax, weight_decay,
     post_spike_weight_decay, reset, refrac, thresh, intensity, time_steps, dt,
     enable_astrocyte, alpha, k,
-    reinforce_lr, temperature, reward_goal, step_penalty
+    reinforce_lr, temperature, reward_goal, step_penalty,
+    gamma, baseline_decay, policy_mix_beta, enable_stdp_during_training,
+    running_baseline=0.0,
 ):
     network = Network(dt=dt)
     input_layer = Input(n=NA, traces=True, thresh=thresh, rest=reset, reset=reset, refrac=refrac)
@@ -96,16 +98,16 @@ def setup_and_run_simulation_reinforce(
     conn_XY = Connection(input_layer, output_layer, impulse_amplitude=0.5, impulse_amplitude_2=0.5,
                          impulse_length=40, impulse_shape_factor=0.9, invert=True,
                          update_rule=WeightDependentPostPre, w=weights_init_XY, nu=[10, 10],
-                         wmin=wmin, wmax=wmax, weight_decay=weight_decay,
-                         post_spike_weight_decay=post_spike_weight_decay)
+                         wmin=wmin, wmax=wmax, weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
+                         baseline_decay=baseline_decay, policy_mix_beta=policy_mix_beta)
     conn_XI = Connection(input_layer, inhibitor_layer, impulse_amplitude=0.5, impulse_amplitude_2=0.5,
                          impulse_length=40, impulse_shape_factor=0.9, invert=True, update_rule=NoOp,
                          w=weights_init_XI, nu=[learning_rate, learning_rate], wmin=-100, wmax=wmax,
                          weight_decay=0, post_spike_weight_decay=post_spike_weight_decay)
     conn_IY = Connection(inhibitor_layer, output_layer, impulse_amplitude=0.5, impulse_amplitude_2=0.5,
-                         impulse_length=40, impulse_shape_factor=0.9, invert=True, update_rule=NoOp,
-                         w=-weights_init_XI, nu=[learning_rate, learning_rate], wmin=-100, wmax=wmax,
-                         weight_decay=0, post_spike_weight_decay=post_spike_weight_decay)
+                          impulse_length=40, impulse_shape_factor=0.9, invert=True, update_rule=NoOp,
+                          w=-weights_init_XI, nu=[learning_rate, learning_rate], wmin=-100, wmax=wmax,
+                          weight_decay=0, post_spike_weight_decay=post_spike_weight_decay)
     network.add_layer(input_layer, 'X')
     network.add_layer(output_layer, 'Y')
     network.add_layer(inhibitor_layer, 'I')
@@ -116,7 +118,7 @@ def setup_and_run_simulation_reinforce(
     global_monitor = NetworkMonitor(network, state_vars=state_vars)
     network.add_monitor(global_monitor, 'Network')
 
-    network.connections['X_Y'].reset_eligibility()
+    conn_XY.running_baseline = running_baseline
     mask_tensor = torch.Tensor(weights_mask_XY).float()
 
     start = t()
@@ -130,7 +132,6 @@ def setup_and_run_simulation_reinforce(
         for j in range(NA):
             if weights_mask_XY[current_position, j] > 0 and j != current_position:
                 adjacent_positions.append(j)
-        weights_before = network.connections['X_Y'].w.detach().clone()
         input_data = torch.zeros(1, NA)
         input_data[0, current_position] = intensity
         sample = next(bernoulli_loader(data=(input_data / time_steps) * dt, time=time_steps)).float()
@@ -138,38 +139,40 @@ def setup_and_run_simulation_reinforce(
         injects_v = {'I': torch.full((NA,), 0.02)}
         network.run(inpts=inpts, time=time_steps, injects_v=injects_v,
                     current_position=current_position, adjacent_positions=adjacent_positions,
-                    conn_XY=conn_XY)
+                    conn_XY=conn_XY, enable_stdp=enable_stdp_during_training)
         recordings = network.monitors['Network'].get()
         spikes = np.asarray(recordings['Y']['s'])
         summed = np.squeeze(np.sum(spikes, axis=0))
-        summed = summed + weights_mask_XY[current_position, :]
-        delta = network.connections['X_Y'].w.detach().clone() - weights_before
-
-        prefs = torch.tensor([summed[a] for a in adjacent_positions], dtype=torch.float32)
-        probs = torch.softmax(prefs / temperature, dim=0)
+        summed_with_mask = summed + weights_mask_XY[current_position, :]
+        w = network.connections['X_Y'].w.detach()
+        weight_prefs = torch.tensor([w[current_position, a] for a in adjacent_positions], dtype=torch.float32)
+        spike_prefs = torch.tensor([summed_with_mask[a] for a in adjacent_positions], dtype=torch.float32)
+        logits = policy_mix_beta * weight_prefs + (1 - policy_mix_beta) * spike_prefs
+        probs = torch.softmax(logits / temperature, dim=0)
         probs = probs / probs.sum()
         dist = torch.distributions.Categorical(probs)
         chosen_idx = dist.sample().item()
         new_position = adjacent_positions[chosen_idx]
 
-        network.connections['X_Y'].accumulate_eligibility(
-            current_position, adjacent_positions, probs, new_position, delta
-        )
+        step_reward = step_penalty
+        if new_position == goal:
+            step_reward += reward_goal
 
+        conn_XY.store_step(current_position, adjacent_positions, probs, chosen_idx, step_reward)
         network.connections['X_Y'].w.data *= mask_tensor
         current_position = new_position
         network.reset_()
 
     elapsed = t() - start
     reached_goal = (current_position == goal)
-    G = reward_goal * (1.0 if reached_goal else 0.0) + step_penalty * len(positions)
 
-    network.connections['X_Y'].set_reward(G)
-    network.connections['X_Y'].apply_reinforce_update(reinforce_lr)
-    network.connections['X_Y'].w.data *= mask_tensor
+    conn_XY.compute_and_apply_reinforce_update(
+        lr=reinforce_lr, gamma=gamma, temperature=temperature, mask=mask_tensor
+    )
 
     weights_2d = network.connections['X_Y'].w.detach().cpu().numpy()
-    return positions, weights_2d, int(reached_goal), elapsed
+    new_baseline = conn_XY.running_baseline
+    return positions, weights_2d, int(reached_goal), elapsed, new_baseline
 
 
 def run_experiment(config: dict, logger: ExperimentLogger = None):
@@ -211,6 +214,10 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
     temperature = reinf_cfg.get("temperature", 1.0)
     reward_goal = reinf_cfg.get("reward_goal", 10.0)
     step_penalty = reinf_cfg.get("step_penalty", -0.1)
+    gamma = reinf_cfg.get("gamma", 0.99)
+    baseline_decay = reinf_cfg.get("baseline_decay", 0.01)
+    policy_mix_beta = reinf_cfg.get("policy_mix_beta", 0.5)
+    enable_stdp_during_training = reinf_cfg.get("enable_stdp_during_training", True)
 
     exp_cfg = config.get("experiment", {})
     num_cycles = exp_cfg.get("num_cycles", config.get("num_cycles", 20))
@@ -266,6 +273,8 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
             "initial/elapsed_time": elapsed_time
         }, step=0)
 
+        running_baseline = 0.0
+
         for cycle_idx in range(num_cycles):
             cycle_num = cycle_idx + 1
 
@@ -274,7 +283,7 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
             print(f"{'=' * 60}")
 
             if reinf_enable:
-                positions_train, weights_2d_train, goal_reached_train, elapsed_time_train = setup_and_run_simulation_reinforce(
+                positions_train, weights_2d_train, goal_reached_train, elapsed_time_train, running_baseline = setup_and_run_simulation_reinforce(
                     NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
                     weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
                     goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
@@ -283,6 +292,10 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                     time_steps=time_steps, dt=dt, enable_astrocyte=enable_astrocyte, alpha=alpha, k=k,
                     reinforce_lr=reinf_lr, temperature=temperature,
                     reward_goal=reward_goal, step_penalty=step_penalty,
+                    gamma=gamma, baseline_decay=baseline_decay,
+                    policy_mix_beta=policy_mix_beta,
+                    enable_stdp_during_training=enable_stdp_during_training,
+                    running_baseline=running_baseline,
                 )
             else:
                 positions_train, weights_2d_train, goal_reached_train, elapsed_time_train = setup_and_run_simulation(
