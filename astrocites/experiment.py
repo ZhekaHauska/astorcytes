@@ -116,7 +116,6 @@ def setup_and_run_simulation_reinforce(
     global_monitor = NetworkMonitor(network, state_vars=state_vars)
     network.add_monitor(global_monitor, 'Network')
 
-    total_stdp_delta = torch.zeros(NA, NA)
     network.connections['X_Y'].reset_eligibility()
     mask_tensor = torch.Tensor(weights_mask_XY).float()
 
@@ -145,7 +144,6 @@ def setup_and_run_simulation_reinforce(
         summed = np.squeeze(np.sum(spikes, axis=0))
         summed = summed + weights_mask_XY[current_position, :]
         delta = network.connections['X_Y'].w.detach().clone() - weights_before
-        total_stdp_delta += delta
 
         prefs = torch.tensor([summed[a] for a in adjacent_positions], dtype=torch.float32)
         probs = torch.softmax(prefs / temperature, dim=0)
@@ -166,7 +164,6 @@ def setup_and_run_simulation_reinforce(
     reached_goal = (current_position == goal)
     G = reward_goal * (1.0 if reached_goal else 0.0) + step_penalty * len(positions)
 
-    network.connections['X_Y'].w.data -= total_stdp_delta
     network.connections['X_Y'].set_reward(G)
     network.connections['X_Y'].apply_reinforce_update(reinforce_lr)
     network.connections['X_Y'].w.data *= mask_tensor
