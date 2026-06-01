@@ -179,8 +179,6 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
     if logger is None:
         logger = FileLogger(output_dir=config.get("output_dir", "results"))
 
-    logger.log_params(config)
-
     N = config["grid_size"]
     NA = N * N
     weights_mask_XY = create_adjacency_matrix(N)
@@ -236,6 +234,9 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
             seed = seeds[exp_idx]
         else:
             seed = random.randint(0, 2**31 - 1)
+
+        config['seed'] = seed
+        logger.log_params(config)
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
