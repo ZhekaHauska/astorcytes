@@ -249,7 +249,7 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
         all_weight_matrices.append(QAZ_initial.copy())
 
         print(f"\n{'=' * 60}")
-        print("INITIAL RUN WITHOUT ASTROCYTES")
+        print("INITIAL RUN (BASELINE)")
         print(f"{'=' * 60}")
 
         positions, weights_2d, goal_reached, elapsed_time = setup_and_run_simulation(
@@ -260,54 +260,54 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
             reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
             time_steps=time_steps, dt=dt, enable_astrocyte=False, alpha=alpha, k=k,
         )
-        all_routes.append(f"Route without astrocytes (initial): {positions}")
+        all_routes.append(f"Route (initial baseline): {positions}")
         route_lengths.append(len(positions) - 1)
 
         logger.log_metrics({
-            "initial_no_astro/route_length": len(positions) - 1,
-            "initial_no_astro/goal_reached": goal_reached,
-            "initial_no_astro/elapsed_time": elapsed_time
+            "initial/route_length": len(positions) - 1,
+            "initial/goal_reached": goal_reached,
+            "initial/elapsed_time": elapsed_time
         }, step=0)
 
         for cycle_idx in range(num_cycles):
             cycle_num = cycle_idx + 1
 
-            if enable_astrocyte:
-                print(f"\n{'=' * 60}")
-                print(f"RUN WITH ASTROCYTES {cycle_num} OUT OF {num_cycles}")
-                print(f"{'=' * 60}")
-
-                if reinf_enable:
-                    positions_astro, weights_2d_astro, goal_reached, elapsed_time = setup_and_run_simulation_reinforce(
-                        NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
-                        weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
-                        goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
-                        weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
-                        reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
-                        time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
-                        reinforce_lr=reinf_lr, temperature=temperature,
-                        reward_goal=reward_goal, step_penalty=step_penalty,
-                    )
-                else:
-                    positions_astro, weights_2d_astro, goal_reached, elapsed_time = setup_and_run_simulation(
-                        NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
-                        weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
-                        goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
-                        weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
-                        reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
-                        time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
-                    )
-                QAZ_after_astro = weights_2d_astro * weights_mask_XY
-                all_weight_matrices.append(QAZ_after_astro.copy())
-                weights_init_XY = torch.Tensor(weights_2d_astro).float()
-                all_routes.append(f"Route with astrocytes (cycle {cycle_num}): {positions_astro}")
-                route_lengths.append(len(positions_astro) - 1)
-
             print(f"\n{'=' * 60}")
-            print(f"CYCLE {cycle_num}/{num_cycles}: VERIFICATION WITHOUT ASTROCYTES")
+            print(f"TRAINING CYCLE {cycle_num}/{num_cycles}")
             print(f"{'=' * 60}")
 
-            positions_no_astro, weights_2d_no_astro, goal_reached_astro, elapsed_time_astro = setup_and_run_simulation(
+            if reinf_enable:
+                positions_train, weights_2d_train, goal_reached_train, elapsed_time_train = setup_and_run_simulation_reinforce(
+                    NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
+                    weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
+                    goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
+                    weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
+                    reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
+                    time_steps=time_steps, dt=dt, enable_astrocyte=enable_astrocyte, alpha=alpha, k=k,
+                    reinforce_lr=reinf_lr, temperature=temperature,
+                    reward_goal=reward_goal, step_penalty=step_penalty,
+                )
+            else:
+                positions_train, weights_2d_train, goal_reached_train, elapsed_time_train = setup_and_run_simulation(
+                    NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
+                    weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
+                    goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
+                    weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
+                    reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
+                    time_steps=time_steps, dt=dt, enable_astrocyte=enable_astrocyte, alpha=alpha, k=k,
+                )
+
+            QAZ_after_train = weights_2d_train * weights_mask_XY
+            all_weight_matrices.append(QAZ_after_train.copy())
+            weights_init_XY = torch.Tensor(weights_2d_train).float()
+            all_routes.append(f"Route (training, cycle {cycle_num}): {positions_train}")
+            route_lengths.append(len(positions_train) - 1)
+
+            print(f"\n{'=' * 60}")
+            print(f"VERIFICATION CYCLE {cycle_num}/{num_cycles}")
+            print(f"{'=' * 60}")
+
+            positions_verify, weights_2d_verify, goal_reached_verify, elapsed_time_verify = setup_and_run_simulation(
                 NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
                 weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
                 goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
@@ -315,18 +315,17 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                 reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
                 time_steps=time_steps, dt=dt, enable_astrocyte=False, alpha=alpha, k=k,
             )
-            all_routes.append(f"Route without astrocytes (cycle {cycle_num}): {positions_no_astro}")
-            route_lengths.append(len(positions_no_astro) - 1)
+            all_routes.append(f"Route (verification, cycle {cycle_num}): {positions_verify}")
+            route_lengths.append(len(positions_verify) - 1)
 
             metrics = {
-                "no_astro/route_length": len(positions_no_astro) - 1,
-                "no_astro/goal_reached": goal_reached_astro,
-                "no_astro/elapsed_time": elapsed_time_astro
+                "train/route_length": len(positions_train) - 1,
+                "train/goal_reached": goal_reached_train,
+                "train/elapsed_time": elapsed_time_train,
+                "verify/route_length": len(positions_verify) - 1,
+                "verify/goal_reached": goal_reached_verify,
+                "verify/elapsed_time": elapsed_time_verify,
             }
-            if enable_astrocyte:
-                metrics["astro/route_length"] = len(positions_astro) - 1
-                metrics["astro/goal_reached"] = goal_reached
-                metrics["astro/elapsed_time"] = elapsed_time
             logger.log_metrics(metrics, step=cycle_num)
 
         logger.start_experiment(f"experiment_{experiment_num}")
@@ -340,7 +339,7 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                 if i == 0:
                     f.write("INITIAL WEIGHT MATRIX:\n")
                 else:
-                    f.write(f"WEIGHT MATRIX AFTER CYCLE {i} WITH ASTROCYTES:\n")
+                    f.write(f"WEIGHT MATRIX AFTER TRAINING CYCLE {i}:\n")
                 np.savetxt(f, weight_matrix, fmt='%.4f')
                 f.write("\n" + "-" * 30 + "\n\n")
 
