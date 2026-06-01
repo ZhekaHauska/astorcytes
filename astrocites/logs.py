@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class ExperimentLogger(ABC):
     @property
     def active_exp_dir(self) -> Path:
-        return self.exp_dir
+        return getattr(self, 'exp_dir', None)
 
     @abstractmethod
     def log_params(self, params: dict):
@@ -92,6 +92,17 @@ class CometLogger(ExperimentLogger):
         self._workspace = workspace
         self._project_name = project_name
         self._output_dir = output_dir
+        if output_dir is not None:
+            self.output_dir = Path(output_dir)
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.experiment_name = experiment_name or f"experiment_{timestamp}"
+            self.exp_dir = self.output_dir / self.experiment_name
+            self.exp_dir.mkdir(parents=True, exist_ok=True)
+            self._active_exp_dir = self.exp_dir
+        else:
+            self.exp_dir = None
+            self._active_exp_dir = None
         self._experiments = []
         self._active_experiment = self._comet_ml.Experiment(
             workspace=workspace,
@@ -110,9 +121,16 @@ class CometLogger(ExperimentLogger):
     def log_artifact(self, filepath: str):
         self._active_experiment.log_asset(filepath)
 
+    @property
+    def active_exp_dir(self) -> Path:
+        return self._active_exp_dir
+
     def start_experiment(self, name: str):
         if self._active_experiment is not None:
             self._active_experiment.end()
+        if self.exp_dir is not None:
+            self._active_exp_dir = self.exp_dir / name
+            self._active_exp_dir.mkdir(parents=True, exist_ok=True)
         self._active_experiment = self._comet_ml.Experiment(
             workspace=self._workspace,
             project_name=self._project_name,
@@ -134,6 +152,17 @@ class AimLogger(ExperimentLogger):
         self._aim = Run
         self._repo = repo
         self._output_dir = output_dir
+        if output_dir is not None:
+            self.output_dir = Path(output_dir)
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.experiment_name = experiment_name or f"experiment_{timestamp}"
+            self.exp_dir = self.output_dir / self.experiment_name
+            self.exp_dir.mkdir(parents=True, exist_ok=True)
+            self._active_exp_dir = self.exp_dir
+        else:
+            self.exp_dir = None
+            self._active_exp_dir = None
         self._runs = []
         self._active_run = self._aim(repo=repo, experiment=experiment_name, **kwargs)
         self._runs.append(self._active_run)
@@ -149,9 +178,16 @@ class AimLogger(ExperimentLogger):
     def log_artifact(self, filepath: str):
         self._active_run.track_artifact(filepath)
 
+    @property
+    def active_exp_dir(self) -> Path:
+        return self._active_exp_dir
+
     def start_experiment(self, name: str):
         if self._active_run is not None:
             self._active_run.close()
+        if self.exp_dir is not None:
+            self._active_exp_dir = self.exp_dir / name
+            self._active_exp_dir.mkdir(parents=True, exist_ok=True)
         self._active_run = self._aim(repo=self._repo, experiment=name)
         self._runs.append(self._active_run)
 
