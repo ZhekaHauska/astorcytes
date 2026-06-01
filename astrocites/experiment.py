@@ -87,7 +87,8 @@ def setup_and_run_simulation_reinforce(
     post_spike_weight_decay, reset, refrac, thresh, intensity, time_steps, dt,
     enable_astrocyte, alpha, k,
     reinforce_lr, temperature, reward_goal, step_penalty,
-    gamma, baseline_decay, policy_mix_beta, enable_stdp_during_training,
+    gamma, baseline_decay, policy_mix_beta, trace_decay,
+    enable_stdp_during_training,
     running_baseline=0.0,
 ):
     network = Network(dt=dt)
@@ -99,7 +100,8 @@ def setup_and_run_simulation_reinforce(
                          impulse_length=40, impulse_shape_factor=0.9, invert=True,
                          update_rule=WeightDependentPostPre, w=weights_init_XY, nu=[10, 10],
                          wmin=wmin, wmax=wmax, weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
-                         baseline_decay=baseline_decay, policy_mix_beta=policy_mix_beta)
+                         baseline_decay=baseline_decay, policy_mix_beta=policy_mix_beta,
+                         gamma=gamma, trace_decay=trace_decay, temperature=temperature)
     conn_XI = Connection(input_layer, inhibitor_layer, impulse_amplitude=0.5, impulse_amplitude_2=0.5,
                          impulse_length=40, impulse_shape_factor=0.9, invert=True, update_rule=NoOp,
                          w=weights_init_XI, nu=[learning_rate, learning_rate], wmin=-100, wmax=wmax,
@@ -147,8 +149,8 @@ def setup_and_run_simulation_reinforce(
         w = network.connections['X_Y'].w.detach()
         weight_prefs = torch.tensor([w[current_position, a] for a in adjacent_positions], dtype=torch.float32)
         spike_prefs = torch.tensor([summed_with_mask[a] for a in adjacent_positions], dtype=torch.float32)
-        logits = policy_mix_beta * weight_prefs + (1 - policy_mix_beta) * spike_prefs
-        probs = torch.softmax(logits / temperature, dim=0)
+        logits = conn_XY.policy_mix_beta * weight_prefs + (1 - conn_XY.policy_mix_beta) * spike_prefs
+        probs = torch.softmax(logits / conn_XY.temperature, dim=0)
         probs = probs / probs.sum()
         dist = torch.distributions.Categorical(probs)
         chosen_idx = dist.sample().item()
@@ -158,7 +160,7 @@ def setup_and_run_simulation_reinforce(
         if new_position == goal:
             step_reward += reward_goal
 
-        conn_XY.store_step(current_position, adjacent_positions, probs, chosen_idx, step_reward)
+        conn_XY.accumulate_trace(current_position, adjacent_positions, probs, chosen_idx, step_reward)
         network.connections['X_Y'].w.data *= mask_tensor
         current_position = new_position
         network.reset_()
@@ -166,9 +168,7 @@ def setup_and_run_simulation_reinforce(
     elapsed = t() - start
     reached_goal = (current_position == goal)
 
-    conn_XY.compute_and_apply_reinforce_update(
-        lr=reinforce_lr, gamma=gamma, temperature=temperature, mask=mask_tensor
-    )
+    conn_XY.compute_and_apply_reinforce_update(lr=reinforce_lr, mask=mask_tensor)
 
     weights_2d = network.connections['X_Y'].w.detach().cpu().numpy()
     new_baseline = conn_XY.running_baseline
@@ -218,6 +218,7 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
     baseline_decay = reinf_cfg.get("baseline_decay", 0.01)
     policy_mix_beta = reinf_cfg.get("policy_mix_beta", 0.5)
     enable_stdp_during_training = reinf_cfg.get("enable_stdp_during_training", True)
+    trace_decay = reinf_cfg.get("trace_decay", 0.95)
 
     exp_cfg = config.get("experiment", {})
     num_cycles = exp_cfg.get("num_cycles", config.get("num_cycles", 20))
@@ -293,7 +294,7 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                     reinforce_lr=reinf_lr, temperature=temperature,
                     reward_goal=reward_goal, step_penalty=step_penalty,
                     gamma=gamma, baseline_decay=baseline_decay,
-                    policy_mix_beta=policy_mix_beta,
+                    policy_mix_beta=policy_mix_beta, trace_decay=trace_decay,
                     enable_stdp_during_training=enable_stdp_during_training,
                     running_baseline=running_baseline,
                 )

@@ -34,6 +34,7 @@ reinforce:
   gamma: 0.99
   baseline_decay: 0.01
   policy_mix_beta: 0.5
+  trace_decay: 0.95
   enable_stdp_during_training: true
 
 experiment:

@@ -8,7 +8,8 @@ class Connection(torch.nn.Module):
                  impulse_length=40, impulse_shape_factor=0.9, invert=False,
                  update_rule=NoOp, w=None, nu=None, wmin=0, wmax=1,
                  weight_decay=0, post_spike_weight_decay=0,
-                 baseline_decay=0.01, policy_mix_beta=0.5, **kwargs):
+                 baseline_decay=0.01, policy_mix_beta=0.5,
+                 gamma=0.99, trace_decay=0.95, temperature=1.0, **kwargs):
         super().__init__()
         self.source = source
         self.target = target
@@ -32,10 +33,15 @@ class Connection(torch.nn.Module):
         self.invert = invert
         self.register_buffer("a_pre", torch.zeros(source.n))
         self.register_buffer("impulse_state", torch.zeros(source.n))
+        self.register_buffer("eligibility", torch.zeros(source.n, target.n))
         self.baseline_decay = baseline_decay
         self.policy_mix_beta = policy_mix_beta
+        self.gamma = gamma
+        self.trace_decay = trace_decay
+        self.temperature = temperature
         self.running_baseline = 0.0
-        self.step_buffer = []
+        self.reward_accumulator = 0.0
+        self.discount = 1.0
 
     def impulse_curve(self):
         k = self.impulse_shape_factor
@@ -73,54 +79,31 @@ class Connection(torch.nn.Module):
     def update(self, **kwargs):
         self.update_rule.update(**kwargs)
 
-    def store_step(self, s_idx, adj_positions, probs, chosen_idx, step_reward):
-        self.step_buffer.append({
-            's_idx': s_idx,
-            'adj_positions': list(adj_positions),
-            'probs': probs.detach().clone(),
-            'chosen_idx': chosen_idx,
-            'step_reward': step_reward,
-        })
-
-    def compute_and_apply_reinforce_update(self, lr, gamma, temperature, mask=None):
-        T = len(self.step_buffer)
-        if T == 0:
-            return
-
-        rewards = [step['step_reward'] for step in self.step_buffer]
-        returns = []
-        G = 0.0
-        for r in reversed(rewards):
-            G = r + gamma * G
-            returns.insert(0, G)
-
-        self.running_baseline = (1 - self.baseline_decay) * self.running_baseline + self.baseline_decay * returns[0]
-        baseline = self.running_baseline
-
-        delta_w = torch.zeros_like(self.w)
+    def accumulate_trace(self, s_idx, adj_positions, probs, chosen_idx, step_reward):
+        self.eligibility *= self.trace_decay
         beta = self.policy_mix_beta
+        for i, a in enumerate(adj_positions):
+            indicator = 1.0 if i == chosen_idx else 0.0
+            score = beta / self.temperature * (indicator - probs[i].item())
+            self.eligibility[s_idx, a] += score
+        self.reward_accumulator += self.discount * step_reward
+        self.discount *= self.gamma
 
-        for t, step in enumerate(self.step_buffer):
-            s_idx = step['s_idx']
-            adj_positions = step['adj_positions']
-            probs = step['probs']
-            chosen_idx = step['chosen_idx']
-            advantage = returns[t] - baseline
-
-            for i, a in enumerate(adj_positions):
-                indicator = 1.0 if i == chosen_idx else 0.0
-                score = beta / temperature * (indicator - probs[i].item())
-                delta_w[s_idx, a] += advantage * score
-
-        self.w.data += lr * delta_w
+    def compute_and_apply_reinforce_update(self, lr, mask=None):
+        advantage = self.reward_accumulator - self.running_baseline
+        self.running_baseline = (1 - self.baseline_decay) * self.running_baseline + self.baseline_decay * self.reward_accumulator
+        self.w.data += lr * advantage * self.eligibility
         self.w.data.clamp_(self.wmin, self.wmax)
         if mask is not None:
             self.w.data *= mask
-
-        self.step_buffer = []
+        self.eligibility.zero_()
+        self.reward_accumulator = 0.0
+        self.discount = 1.0
 
     def reset_episode(self):
-        self.step_buffer = []
+        self.eligibility.zero_()
+        self.reward_accumulator = 0.0
+        self.discount = 1.0
 
     def reset_(self):
         self.a_pre.zero_()
