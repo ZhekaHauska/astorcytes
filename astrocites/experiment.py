@@ -281,28 +281,15 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                 print(f"RUN WITH ASTROCYTES {cycle_num} OUT OF {num_cycles}")
                 print(f"{'=' * 60}")
 
-                if reinf_enable:
-                    positions_astro, weights_2d_astro = setup_and_run_simulation_reinforce(
-                        NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
-                        weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
-                        goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
-                        weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
-                        reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
-                        time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
-                        reinforce_lr=reinf_lr, temperature=temperature,
-                        reward_goal=reward_goal, step_penalty=step_penalty,
-                        logger=logger,
-                    )
-                else:
-                    positions_astro, weights_2d_astro = setup_and_run_simulation(
-                        NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
-                        weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
-                        goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
-                        weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
-                        reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
-                        time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
-                        logger=logger,
-                    )
+                positions_astro, weights_2d_astro = setup_and_run_simulation(
+                    NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
+                    weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
+                    goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
+                    weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
+                    reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
+                    time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
+                    logger=logger,
+                )
                 QAZ_after_astro = weights_2d_astro * weights_mask_XY
                 all_weight_matrices.append(QAZ_after_astro.copy())
                 weights_init_XY = torch.Tensor(weights_2d_astro).float()
@@ -332,8 +319,8 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                 metrics[f"exp{experiment_num}.astro_route_length"] = len(positions_astro) - 1
             logger.log_metrics(metrics, step=cycle_num)
 
-        results_dir = os.path.join(str(logger.exp_dir), f"experiment_{experiment_num}")
-        os.makedirs(results_dir, exist_ok=True)
+        logger.start_experiment(f"experiment_{experiment_num}")
+        results_dir = str(logger.active_exp_dir)
 
         weights_filename = os.path.join(results_dir, "weight_matrices.txt")
         with open(weights_filename, 'w') as f:

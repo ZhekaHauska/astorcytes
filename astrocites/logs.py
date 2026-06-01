@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 
 
 class ExperimentLogger(ABC):
+    @property
+    def active_exp_dir(self) -> Path:
+        return self.exp_dir
+
     @abstractmethod
     def log_params(self, params: dict):
         ...
@@ -24,6 +28,9 @@ class ExperimentLogger(ABC):
     @abstractmethod
     def finish(self):
         ...
+
+    def start_experiment(self, name: str):
+        pass
 
 
 class FileLogger(ExperimentLogger):
@@ -58,9 +65,17 @@ class FileLogger(ExperimentLogger):
     def log_artifact(self, filepath: str):
         import shutil
         src = Path(filepath)
-        dst = self.exp_dir / src.name
+        dst = self._active_exp_dir / src.name
         if src.exists():
             shutil.copy2(src, dst)
+
+    def start_experiment(self, name: str):
+        self._active_exp_dir = self.exp_dir / name
+        self._active_exp_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def active_exp_dir(self) -> Path:
+        return self._active_exp_dir
 
     def finish(self):
         self._metrics_file.close()
@@ -73,24 +88,40 @@ class CometLogger(ExperimentLogger):
             import comet_ml
         except ImportError:
             raise ImportError("comet-ml is required for CometLogger. Install with: pip install comet-ml")
-        self.experiment = comet_ml.Experiment(
+        self._comet_ml = comet_ml
+        self._workspace = workspace
+        self._project_name = project_name
+        self._output_dir = output_dir
+        self._experiments = []
+        self._active_experiment = self._comet_ml.Experiment(
             workspace=workspace,
             project_name=project_name,
+            experiment_name=experiment_name,
             **kwargs,
         )
-        self._output_dir = output_dir
+        self._experiments.append(self._active_experiment)
 
     def log_params(self, params: dict):
-        self.experiment.log_parameters(params)
+        self._active_experiment.log_parameters(params)
 
     def log_metrics(self, metrics: dict, step: int = None):
-        self.experiment.log_metrics(metrics, step=step)
+        self._active_experiment.log_metrics(metrics, step=step)
 
     def log_artifact(self, filepath: str):
-        self.experiment.log_asset(filepath)
+        self._active_experiment.log_asset(filepath)
+
+    def start_experiment(self, name: str):
+        if self._active_experiment is not None:
+            self._active_experiment.end()
+        self._active_experiment = self._comet_ml.Experiment(
+            workspace=self._workspace,
+            project_name=self._project_name,
+            experiment_name=name,
+        )
+        self._experiments.append(self._active_experiment)
 
     def finish(self):
-        self.experiment.end()
+        self._active_experiment.end()
 
 
 class AimLogger(ExperimentLogger):
@@ -100,22 +131,32 @@ class AimLogger(ExperimentLogger):
             from aim import Run
         except ImportError:
             raise ImportError("aim is required for AimLogger. Install with: pip install aim")
-        self.run = Run(repo=repo, experiment=experiment_name, **kwargs)
+        self._aim = Run
+        self._repo = repo
         self._output_dir = output_dir
+        self._runs = []
+        self._active_run = self._aim(repo=repo, experiment=experiment_name, **kwargs)
+        self._runs.append(self._active_run)
 
     def log_params(self, params: dict):
         for key, value in params.items():
-            self.run[("params", key)] = value
+            self._active_run[("params", key)] = value
 
     def log_metrics(self, metrics: dict, step: int = None):
         for key, value in metrics.items():
-            self.run.track(value, name=key, step=step)
+            self._active_run.track(value, name=key, step=step)
 
     def log_artifact(self, filepath: str):
-        self.run.track_artifact(filepath)
+        self._active_run.track_artifact(filepath)
+
+    def start_experiment(self, name: str):
+        if self._active_run is not None:
+            self._active_run.close()
+        self._active_run = self._aim(repo=self._repo, experiment=name)
+        self._runs.append(self._active_run)
 
     def finish(self):
-        self.run.close()
+        self._active_run.close()
 
 
 def get_logger(logger_type: str = "file", **kwargs) -> ExperimentLogger:

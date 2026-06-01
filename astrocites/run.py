@@ -78,10 +78,13 @@ def main():
         num_exp = exp_cfg.get("num_experiments", config.get("num_experiments", 5))
         exp_cfg["seeds"] = [random.randint(0, 2**31 - 1) for _ in range(num_exp)]
 
+    comet_cfg = config.get("comet", {})
     logger = get_logger(
         logger_type=args.logger,
         output_dir=config.get("output_dir", "results"),
         experiment_name=f"grid{config['grid_size']}_{config.get('experiment_name', 'run')}_{run_name}",
+        workspace=comet_cfg.get("workspace"),
+        project_name=comet_cfg.get("project_name"),
     )
 
     print("START OF EXPERIMENT SERIES")

@@ -39,3 +39,6 @@ experiment:
 
 output_dir: "results"
 logger_type: "file"
+comet:
+  workspace: null
+  project_name: null
