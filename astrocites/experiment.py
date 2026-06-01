@@ -17,7 +17,7 @@ def setup_and_run_simulation(
     NA, weights_mask_XY, weights_init_XY, weights_init_XI, n_steps,
     current_position, goal, learning_rate, wmin, wmax, weight_decay,
     post_spike_weight_decay, reset, refrac, thresh, intensity, time_steps, dt,
-    enable_astrocyte, alpha, k, logger=None,
+    enable_astrocyte, alpha, k
 ):
     network = Network(dt=dt)
     input_layer = Input(n=NA, traces=True, thresh=thresh, rest=reset, reset=reset, refrac=refrac)
@@ -77,9 +77,8 @@ def setup_and_run_simulation(
         current_position = new_position
         network.reset_()
     elapsed = t() - start
-    if logger is not None:
-        logger.log_metrics({"elapsed_time": elapsed, "steps_taken": len(positions), "reached_goal": current_position == goal})
-    return positions, weights_2d
+    reached_goal = int(current_position == goal)
+    return positions, weights_2d, reached_goal, elapsed
 
 
 def setup_and_run_simulation_reinforce(
@@ -87,8 +86,7 @@ def setup_and_run_simulation_reinforce(
     current_position, goal, learning_rate, wmin, wmax, weight_decay,
     post_spike_weight_decay, reset, refrac, thresh, intensity, time_steps, dt,
     enable_astrocyte, alpha, k,
-    reinforce_lr, temperature, reward_goal, step_penalty,
-    logger=None,
+    reinforce_lr, temperature, reward_goal, step_penalty
 ):
     network = Network(dt=dt)
     input_layer = Input(n=NA, traces=True, thresh=thresh, rest=reset, reset=reset, refrac=refrac)
@@ -173,11 +171,8 @@ def setup_and_run_simulation_reinforce(
     network.connections['X_Y'].apply_reinforce_update(reinforce_lr)
     network.connections['X_Y'].w.data *= mask_tensor
 
-    if logger is not None:
-        logger.log_metrics({"elapsed_time": elapsed, "steps_taken": len(positions), "reached_goal": reached_goal})
-
     weights_2d = network.connections['X_Y'].w.detach().cpu().numpy()
-    return positions, weights_2d
+    return positions, weights_2d, int(reached_goal), elapsed
 
 
 def run_experiment(config: dict, logger: ExperimentLogger = None):
@@ -257,20 +252,21 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
         print("INITIAL RUN WITHOUT ASTROCYTES")
         print(f"{'=' * 60}")
 
-        positions, weights_2d = setup_and_run_simulation(
+        positions, weights_2d, goal_reached, elapsed_time = setup_and_run_simulation(
             NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
             weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
             goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
             weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
             reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
             time_steps=time_steps, dt=dt, enable_astrocyte=False, alpha=alpha, k=k,
-            logger=logger,
         )
         all_routes.append(f"Route without astrocytes (initial): {positions}")
         route_lengths.append(len(positions) - 1)
 
         logger.log_metrics({
-            f"exp{experiment_num}.initial_no_astro_route_length": len(positions) - 1,
+            "initial_no_astro/route_length": len(positions) - 1,
+            "initial_no_astro/goal_reached": goal_reached,
+            "initial_no_astro/elapsed_time": elapsed_time
         }, step=0)
 
         for cycle_idx in range(num_cycles):
@@ -281,14 +277,13 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                 print(f"RUN WITH ASTROCYTES {cycle_num} OUT OF {num_cycles}")
                 print(f"{'=' * 60}")
 
-                positions_astro, weights_2d_astro = setup_and_run_simulation(
+                positions_astro, weights_2d_astro, goal_reached, elapsed_time = setup_and_run_simulation(
                     NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
                     weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
                     goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
                     weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
                     reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
                     time_steps=time_steps, dt=dt, enable_astrocyte=True, alpha=alpha, k=k,
-                    logger=logger,
                 )
                 QAZ_after_astro = weights_2d_astro * weights_mask_XY
                 all_weight_matrices.append(QAZ_after_astro.copy())
@@ -300,23 +295,26 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
             print(f"CYCLE {cycle_num}/{num_cycles}: VERIFICATION WITHOUT ASTROCYTES")
             print(f"{'=' * 60}")
 
-            positions_no_astro, weights_2d_no_astro = setup_and_run_simulation(
+            positions_no_astro, weights_2d_no_astro, goal_reached_astro, elapsed_time_astro = setup_and_run_simulation(
                 NA=NA, weights_mask_XY=weights_mask_XY, weights_init_XY=weights_init_XY,
                 weights_init_XI=weights_init_XI, n_steps=n_steps, current_position=current_position,
                 goal=goal, learning_rate=learning_rate, wmin=wmin, wmax=wmax,
                 weight_decay=weight_decay, post_spike_weight_decay=post_spike_weight_decay,
                 reset=reset, refrac=refrac, thresh=thresh, intensity=intensity,
                 time_steps=time_steps, dt=dt, enable_astrocyte=False, alpha=alpha, k=k,
-                logger=logger,
             )
             all_routes.append(f"Route without astrocytes (cycle {cycle_num}): {positions_no_astro}")
             route_lengths.append(len(positions_no_astro) - 1)
 
             metrics = {
-                f"exp{experiment_num}.no_astro_route_length": len(positions_no_astro) - 1,
+                "no_astro/route_length": len(positions_no_astro) - 1,
+                "no_astro/goal_reached": goal_reached,
+                "no_astro/elapsed_time": elapsed_time
             }
             if enable_astrocyte:
-                metrics[f"exp{experiment_num}.astro_route_length"] = len(positions_astro) - 1
+                metrics[f"astro/route_length"] = len(positions_astro) - 1
+                metrics[f"astro/goal_reached"] = goal_reached_astro
+                metrics[f"astro/elapsed_time"] = elapsed_time_astro
             logger.log_metrics(metrics, step=cycle_num)
 
         logger.start_experiment(f"experiment_{experiment_num}")
