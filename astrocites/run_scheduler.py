@@ -271,7 +271,7 @@ def run_experiment(
                 "start_time": start_iso,
             }
             save_checkpoint(checkpoint, cp_path)
-            proc = subprocess.Popen(cmd)
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             running[proc.pid] = (proc, time.time(), start_iso, idx)
             print(f"  [{idx+1}/{total}] Started (PID {proc.pid})")
 
@@ -396,7 +396,7 @@ def run_interleaved(
                 "start_time": start_iso,
             }
             save_checkpoint(checkpoint, cp_path)
-            proc = subprocess.Popen(cmd)
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             running[proc.pid] = (proc, time.time(), start_iso, i, idx)
             per_exp_running[i] += 1
             print(
