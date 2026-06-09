@@ -1,0 +1,92 @@
+# Example experiment manifest for the run scheduler.
+#
+# Usage:
+#   python -m astrocites.run_scheduler configs/experiments/example.yaml
+#   python -m astrocites.run_scheduler configs/experiments/example.yaml --dry-run
+#   python -m astrocites.run_scheduler configs/experiments/example.yaml --restart-failed
+#   python -m astrocites.run_scheduler configs/experiments/example.yaml --force
+#
+# Top-level fields:
+#   - max_parallel:    global max concurrent processes (overridable per experiment)
+#   - schedule:        "sequential" (default) - run experiments one after another
+#                      "interleaved" - share global process pool across experiments
+#
+# Each experiment specifies:
+#   - name:            label for this experiment group
+#   - command:         the command to invoke the runner (default: "python -m astrocites.run")
+#   - base_config:     path to the base config YAML (relative to CWD)
+#   - overrides:       base overrides applied to every run in this experiment (optional)
+#   - grid:            parameter grid - cartesian product of all value lists (optional)
+#   - max_parallel:    max concurrent processes for this experiment (falls back to global default)
+#   - logger:          logger type override ("file", "comet", "aim") (optional)
+#   - output_dir:      override output directory (optional)
+#   - num_experiments: override number of experiments (optional)
+#   - num_cycles:      override number of astrocyte cycles (optional)
+#
+# Override key paths use dot-notation matching the config dict structure
+# and are passed to the runner via its -o flag:
+#
+#   -o astrocyte.alpha=0.001 astrocyte.k=0.2 reinforce.learning_rate=0.01
+#
+# Special CLI flags (logger, output_dir, num_experiments, num_cycles) are
+# hoisted from overrides/grid and mapped to their respective runner flags.
+#
+# Checkpointing:
+#   A checkpoint file (<manifest>.checkpoint.json) is created automatically next to the
+#   manifest. It tracks the status of each run (pending, running, ok, fail) so that
+#   interrupted schedules can be resumed.
+#
+#   - Re-running the scheduler resumes from the checkpoint:
+#     ok runs are skipped, pending/interrupted runs are re-queued, failed runs
+#     are skipped unless --restart-failed is given.
+#   - --restart-failed:  re-queue previously failed runs (default: skip them)
+#   - --force:           if the manifest has changed since the last run, merge the
+#     checkpoint with the new manifest instead of erroring out. Keeps states for
+#     unchanged runs, marks new/changed runs as pending, drops removed runs.
+#   - To start completely fresh, delete the checkpoint file:
+#     rm configs/experiments/example.yaml.checkpoint.json
+
+max_parallel: 4
+schedule: sequential
+
+experiments:
+
+  # --- Astrocyte parameter sweep: vary alpha and k ---
+
+  - name: astrocyte_param_sweep
+    command: python -m astrocites.run
+    base_config: configs/default.yaml
+    overrides:
+      logger: file
+    grid:
+      experiment.seeds: [[42, 123], [456, 789]]
+      astrocyte.alpha: [0.001, 0.01]
+      astrocyte.k: [0.1, 0.2, 0.4]
+    max_parallel: 2
+
+  # --- Comparison: with vs without astrocyte ---
+
+  - name: astrocyte_on_off
+    command: python -m astrocites.run
+    base_config: configs/default.yaml
+    overrides:
+      logger: file
+    grid:
+      experiment.seeds: [[42, 123]]
+      astrocyte.enable: [true, false]
+    max_parallel: 2
+
+  # --- Reinforcement learning sweep: vary learning rate and gamma ---
+
+  - name: reinforce_param_sweep
+    command: python -m astrocites.run
+    base_config: configs/default.yaml
+    overrides:
+      logger: file
+      astrocyte.enable: true
+    grid:
+      experiment.seeds: [[42, 123, 456]]
+      reinforce.learning_rate: [0.01, 0.001]
+      reinforce.gamma: [0.99, 0.95]
+    num_cycles: 5
+    max_parallel: 4

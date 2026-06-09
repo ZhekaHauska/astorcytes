@@ -18,6 +18,7 @@ dev = ["pytest>=7.0", "ruff>=0.1"]
 
 [project.scripts]
 astrocites = "astrocites.run:main"
+astrocites-scheduler = "astrocites.run_scheduler:main"
 
 [build-system]
 requires = ["hatchling"]
