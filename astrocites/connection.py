@@ -79,13 +79,25 @@ class Connection(torch.nn.Module):
     def update(self, **kwargs):
         self.update_rule.update(**kwargs)
 
-    def accumulate_trace(self, s_idx, adj_positions, probs, chosen_idx, step_reward):
+    def accumulate_trace(self, s_idx, adj_positions, grad_slice, step_reward):
+        """Accumulate one step of the REINFORCE eligibility trace.
+
+        Parameters
+        ----------
+        s_idx : int
+            Index of the current (source) position.
+        adj_positions : list[int]
+            Candidate target positions, aligned with ``grad_slice``.
+        grad_slice : torch.Tensor
+            Precomputed closed-form eligibility gradient ``d log pi / d w[s, a]``
+            for each candidate action ``a`` (length ``len(adj_positions)``),
+            produced by :func:`astrocites.surrogate.eligibility_gradient`.
+        step_reward : float
+            Reward received for the action taken this step.
+        """
         self.eligibility *= self.trace_decay
-        beta = self.policy_mix_beta
-        for i, a in enumerate(adj_positions):
-            indicator = 1.0 if i == chosen_idx else 0.0
-            score = beta / self.temperature * (indicator - probs[i].item())
-            self.eligibility[s_idx, a] += score
+        idx_tensor = torch.as_tensor(adj_positions, dtype=torch.long)
+        self.eligibility[s_idx, idx_tensor] += grad_slice
         self.reward_accumulator += self.discount * step_reward
         self.discount *= self.gamma
 

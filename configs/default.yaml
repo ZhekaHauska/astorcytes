@@ -28,9 +28,11 @@ reinforce:
   step_penalty: -0.1
   gamma: 0.99
   baseline_decay: 0.01
-  policy_mix_beta: 0.5
+  policy_mix_beta: 0.0
   trace_decay: 0.95
   enable_stdp_during_training: true
+  surrogate:
+    type: "lif"
 
 simulation:
   intensity: 15.0

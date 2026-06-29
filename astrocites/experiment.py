@@ -10,6 +10,7 @@ from astrocites.connection import Connection
 from astrocites.learning import WeightDependentPostPre, NoOp
 from astrocites.network import Network, NetworkMonitor
 from astrocites.utils import bernoulli_loader, create_adjacency_matrix
+from astrocites.surrogate import compute_scale_c, eligibility_gradient, build_lif_params
 from astrocites.logs import ExperimentLogger, FileLogger
 
 
@@ -89,6 +90,7 @@ def setup_and_run_simulation_reinforce(
     reinforce_lr, temperature, reward_goal, step_penalty,
     gamma, baseline_decay, policy_mix_beta, trace_decay,
     enable_stdp_during_training,
+    surrogate_kind="lif", surrogate_params=None,
     running_baseline=0.0,
 ):
     network = Network(dt=dt)
@@ -123,6 +125,12 @@ def setup_and_run_simulation_reinforce(
     conn_XY.running_baseline = running_baseline
     mask_tensor = torch.Tensor(weights_mask_XY).float()
 
+    surrogate_c = compute_scale_c(conn_XY.impulse_amplitude, conn_XY.impulse_length,
+                                  conn_XY.impulse_shape_factor, conn_XY.invert,
+                                  intensity, time_steps)
+    if surrogate_params is None:
+        surrogate_params = build_lif_params(thresh, dt, float(output_layer.tc_decay), refrac)
+
     start = t()
     positions = []
     for i in range(n_steps):
@@ -145,12 +153,11 @@ def setup_and_run_simulation_reinforce(
         recordings = network.monitors['Network'].get()
         spikes = np.asarray(recordings['Y']['s'])
         summed = np.squeeze(np.sum(spikes, axis=0))
-        summed_with_mask = summed + weights_mask_XY[current_position, :]
         w = network.connections['X_Y'].w.detach()
         weight_prefs = torch.tensor([w[current_position, a] for a in adjacent_positions], dtype=torch.float32)
-        spike_prefs = torch.tensor([summed_with_mask[a] for a in adjacent_positions], dtype=torch.float32)
-        logits = conn_XY.policy_mix_beta * weight_prefs + (1 - conn_XY.policy_mix_beta) * spike_prefs
-        probs = torch.softmax(logits / conn_XY.temperature, dim=0)
+        spike_prefs = torch.tensor([summed[a] for a in adjacent_positions], dtype=torch.float32)
+        logits = policy_mix_beta * weight_prefs + (1 - policy_mix_beta) * spike_prefs
+        probs = torch.softmax(logits / temperature, dim=0)
         probs = probs / probs.sum()
         dist = torch.distributions.Categorical(probs)
         chosen_idx = dist.sample().item()
@@ -160,7 +167,11 @@ def setup_and_run_simulation_reinforce(
         if new_position == goal:
             step_reward += reward_goal
 
-        conn_XY.accumulate_trace(current_position, adjacent_positions, probs, chosen_idx, step_reward)
+        w_slice = network.connections['X_Y'].w.data[current_position, adjacent_positions]
+        I_eff = surrogate_c * w_slice
+        grad_slice = eligibility_gradient(adjacent_positions, chosen_idx, I_eff, surrogate_c,
+                                          temperature, surrogate_kind, surrogate_params)
+        conn_XY.accumulate_trace(current_position, adjacent_positions, grad_slice, step_reward)
         network.connections['X_Y'].w.data *= mask_tensor
         current_position = new_position
         network.reset_()
@@ -214,9 +225,28 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
     step_penalty = reinf_cfg.get("step_penalty", -0.1)
     gamma = reinf_cfg.get("gamma", 0.99)
     baseline_decay = reinf_cfg.get("baseline_decay", 0.01)
-    policy_mix_beta = reinf_cfg.get("policy_mix_beta", 0.5)
+    policy_mix_beta = reinf_cfg.get("policy_mix_beta", 0.0)
     enable_stdp_during_training = reinf_cfg.get("enable_stdp_during_training", True)
     trace_decay = reinf_cfg.get("trace_decay", 0.95)
+
+    surr_cfg = reinf_cfg.get("surrogate", {})
+    surrogate_kind = surr_cfg.get("type", "lif")
+    if surrogate_kind == "lif":
+        decay = float(np.exp(-dt / surr_cfg.get("tc_decay", 150.0)))
+        surrogate_params = {
+            "thresh": thresh,
+            "decay": surr_cfg.get("decay", decay),
+            "tc_decay": surr_cfg.get("tc_decay", 150.0),
+            "refrac": refrac,
+        }
+    elif surrogate_kind == "softplus":
+        I_theta_default = thresh * (1.0 - float(np.exp(-dt / 150.0)))
+        surrogate_params = {
+            "I_theta": surr_cfg.get("I_theta", I_theta_default),
+            "scale": surr_cfg.get("scale", 1.0),
+        }
+    else:
+        raise ValueError(f"Unknown surrogate type: {surrogate_kind!r}")
 
     exp_cfg = config.get("experiment", {})
     num_cycles = exp_cfg.get("num_cycles", config.get("num_cycles", 20))
@@ -297,6 +327,7 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
                     gamma=gamma, baseline_decay=baseline_decay,
                     policy_mix_beta=policy_mix_beta, trace_decay=trace_decay,
                     enable_stdp_during_training=enable_stdp_during_training,
+                    surrogate_kind=surrogate_kind, surrogate_params=surrogate_params,
                     running_baseline=running_baseline,
                 )
             else:
