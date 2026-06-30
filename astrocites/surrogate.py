@@ -93,35 +93,40 @@ def softplus_rate_deriv(current, I_theta, scale):
     return scale * torch.sigmoid(scale * (current - I_theta))
 
 
-def nmda_calcium(current, I_half, k):
+def nmda_calcium(current, I_half, k, n_hill=1.0):
     """NMDA-mediated calcium level (Mg2+ unblock sigmoid).
 
-        Ca(I) = sigmoid((I - I_half) / k)
+        Ca(I) = sigmoid(n_hill * (I - I_half) / k)
 
     Monotonically increasing from 0 to 1. ``I_half`` is the half-activation
     current (default: the LIF threshold current ``I_theta``), ``k`` is the slope
-    factor controlling how sharply calcium transitions around threshold.
+    factor, and ``n_hill`` is the Hill cooperativity coefficient. ``n_hill = 1``
+    gives the simple NMDA Mg2+ unblock sigmoid; ``n_hill ~ 3-4`` approximates the
+    cooperativity of Ca2+/calmodulin binding to CaMKII (Hill, 1985; Chin &
+    Means, 2000), sharpening the calcium-to-plasticity threshold.
     """
-    return torch.sigmoid((current - I_half) / k)
+    return torch.sigmoid(n_hill * (current - I_half) / k)
 
 
-def nmda_rate(current, I_half, k, ca_baseline=0.5):
+def nmda_rate(current, I_half, k, ca_baseline=0.5, n_hill=1.0):
     """Rate/logit for the NMDA surrogate.
 
     Defined as the integral of calcium-above-baseline::
 
-        r(I) = k * softplus((I - I_half) / k) - ca_baseline * I
+        r(I) = (k / n_hill) * softplus(n_hill * (I - I_half) / k) - ca_baseline * I
 
     so that ``r'(I) = Ca(I) - ca_baseline`` (see :func:`nmda_rate_deriv`).
 
-    With ``ca_baseline = 0.5`` and ``I_half = I_theta`` this simplifies to
-    ``r(I) = k * ln(cosh((I - I_theta) / (2k)))`` — a smooth threshold function
-    that is approximately zero below threshold and grows linearly above.
+    With ``ca_baseline = 0.5``, ``I_half = I_theta``, ``n_hill = 1`` this
+    simplifies to ``r(I) = k * ln(cosh((I - I_theta) / (2k)))`` — a smooth
+    threshold function that is approximately zero below threshold and grows
+    linearly above.
     """
-    return k * F.softplus((current - I_half) / k) - ca_baseline * current
+    scaled = n_hill * (current - I_half) / k
+    return (k / n_hill) * F.softplus(scaled) - ca_baseline * current
 
 
-def nmda_rate_deriv(current, I_half, k, ca_baseline=0.5):
+def nmda_rate_deriv(current, I_half, k, ca_baseline=0.5, n_hill=1.0):
     """Derivative of :func:`nmda_rate`.
 
         r'(I) = Ca(I) - ca_baseline
@@ -131,9 +136,13 @@ def nmda_rate_deriv(current, I_half, k, ca_baseline=0.5):
     ``ca_baseline = 0.5`` and ``I_half = I_theta``, the sign change occurs
     exactly at the LIF threshold: subthreshold synapses get negative
     eligibility (LTD direction), suprathreshold get positive (LTP direction) —
-    a BCM-like calcium threshold mechanism.
+    a BCM-like calcium threshold mechanism (Bienenstock, Cooper & Munro, 1982).
+
+    The ``n_hill`` parameter controls the steepness of the calcium transition
+    around threshold, modeling the cooperativity of Ca2+/calmodulin binding
+    (n_hill ~ 4 in biology).
     """
-    return nmda_calcium(current, I_half, k) - ca_baseline
+    return nmda_calcium(current, I_half, k, n_hill) - ca_baseline
 
 
 def rate_and_deriv(current, kind, params):
@@ -149,7 +158,7 @@ def rate_and_deriv(current, kind, params):
         Keyword arguments forwarded to the chosen surrogate functions.
         For ``"lif"``: ``thresh``, ``decay``, ``tc_decay``, ``refrac``.
         For ``"softplus"``: ``I_theta``, ``scale``.
-        For ``"nmda"``: ``I_half``, ``k``, ``ca_baseline``.
+        For ``"nmda"``: ``I_half``, ``k``, ``ca_baseline``, ``n_hill``.
     """
     if kind == "lif":
         return lif_rate(current, **params), lif_rate_deriv(current, **params)
@@ -185,13 +194,14 @@ def build_lif_params(thresh, dt, tc_decay, refrac):
     return {"thresh": float(thresh), "decay": decay, "tc_decay": float(tc_decay), "refrac": float(refrac)}
 
 
-def build_nmda_params(thresh, dt, tc_decay, k_frac=0.5, ca_baseline=0.5):
+def build_nmda_params(thresh, dt, tc_decay, k_frac=0.5, ca_baseline=0.5, n_hill=1.0):
     """Pack neuron constants into the dict expected by the ``"nmda"`` surrogate.
 
     ``I_half`` defaults to the LIF threshold current ``I_theta = thresh * (1 -
     decay)``, so calcium half-activation coincides with the spike threshold.
     ``k`` defaults to ``k_frac * I_theta`` (slope factor). ``ca_baseline``
-    defaults to 0.5 (sign change at threshold).
+    defaults to 0.5 (sign change at threshold). ``n_hill`` is the Hill
+    cooperativity coefficient (1 = simple sigmoid; ~4 = Ca2+/CaM cooperativity).
     """
     decay = float(torch.exp(torch.tensor(-float(dt) / float(tc_decay))).item())
     I_theta = float(thresh) * (1.0 - decay)
@@ -199,4 +209,5 @@ def build_nmda_params(thresh, dt, tc_decay, k_frac=0.5, ca_baseline=0.5):
         "I_half": I_theta,
         "k": k_frac * I_theta,
         "ca_baseline": ca_baseline,
+        "n_hill": n_hill,
     }

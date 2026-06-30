@@ -116,13 +116,15 @@ def test_softplus_rate_deriv_autograd():
 # 4. Full eligibility gradient: closed form vs. autograd on log softmax
 # ---------------------------------------------------------------------------
 
-NMDA_PARAMS = dict(I_half=0.0465, k=0.0233, ca_baseline=0.5)
+NMDA_PARAMS = dict(I_half=0.0465, k=0.0233, ca_baseline=0.5, n_hill=1.0)
+NMDA_HILL4_PARAMS = dict(I_half=0.0465, k=0.0233, ca_baseline=0.5, n_hill=4.0)
 
 
 @pytest.mark.parametrize("kind, params", [
     ("lif", LIF_PARAMS),
     ("softplus", dict(I_theta=0.05, scale=2.0)),
     ("nmda", NMDA_PARAMS),
+    ("nmda", NMDA_HILL4_PARAMS),
 ])
 def test_eligibility_gradient_autograd(kind, params):
     torch.manual_seed(0)
@@ -262,11 +264,67 @@ def test_build_nmda_params():
     assert abs(p["I_half"] - I_theta) < 1e-10
     assert abs(p["k"] - 0.5 * I_theta) < 1e-10
     assert p["ca_baseline"] == 0.5
+    assert p["n_hill"] == 1.0
 
 
 def test_build_nmda_params_custom():
-    p = build_nmda_params(thresh=7.0, dt=1.0, tc_decay=150.0, k_frac=0.3, ca_baseline=0.3)
+    p = build_nmda_params(thresh=7.0, dt=1.0, tc_decay=150.0, k_frac=0.3, ca_baseline=0.3, n_hill=4.0)
     decay = float(torch.exp(torch.tensor(-1.0 / 150.0)).item())
     I_theta = 7.0 * (1.0 - decay)
     assert abs(p["k"] - 0.3 * I_theta) < 1e-10
     assert p["ca_baseline"] == 0.3
+    assert p["n_hill"] == 4.0
+
+
+# ---------------------------------------------------------------------------
+# 8. NMDA Hill cooperativity (n_hill > 1)
+# ---------------------------------------------------------------------------
+
+def test_nmda_hill4_deriv_autograd():
+    """Closed-form r' matches autograd for n_hill=4."""
+    current = torch.linspace(0.0, 0.15, 80, requires_grad=True)
+    r = nmda_rate(current, **NMDA_HILL4_PARAMS)
+    autograd_grad = torch.autograd.grad(r.sum(), current, create_graph=False)[0]
+    manual_grad = nmda_rate_deriv(current.detach(), **NMDA_HILL4_PARAMS)
+    assert torch.allclose(autograd_grad, manual_grad, rtol=1e-5, atol=1e-6)
+
+
+def test_nmda_hill_sharpens_threshold():
+    """Higher n_hill should produce steeper transition around I_half."""
+    I_half = NMDA_PARAMS["I_half"]
+    k = NMDA_PARAMS["k"]
+    delta = k * 0.5
+    pts = torch.tensor([I_half - delta, I_half, I_half + delta])
+    rprime_n1 = nmda_rate_deriv(pts, I_half, k, ca_baseline=0.5, n_hill=1.0)
+    rprime_n4 = nmda_rate_deriv(pts, I_half, k, ca_baseline=0.5, n_hill=4.0)
+    slope_n1 = (rprime_n1[2] - rprime_n1[0]).item()
+    slope_n4 = (rprime_n4[2] - rprime_n4[0]).item()
+    assert slope_n4 > slope_n1 * 3, "n_hill=4 should be significantly steeper than n_hill=1"
+
+
+def test_nmda_hill_sign_change_preserved():
+    """Sign change at threshold should hold for any n_hill."""
+    I_half = NMDA_HILL4_PARAMS["I_half"]
+    below = nmda_rate_deriv(torch.tensor([I_half * 0.5]), **NMDA_HILL4_PARAMS)
+    at = nmda_rate_deriv(torch.tensor([I_half]), **NMDA_HILL4_PARAMS)
+    above = nmda_rate_deriv(torch.tensor([I_half * 2.0]), **NMDA_HILL4_PARAMS)
+    assert below.item() < 0
+    assert abs(at.item()) < 1e-6
+    assert above.item() > 0
+
+
+def test_nmda_hill_monotonically_increasing():
+    """Monotonicity should hold for n_hill=4."""
+    current = torch.linspace(0.0, 0.15, 200)
+    rprime = nmda_rate_deriv(current, **NMDA_HILL4_PARAMS)
+    diffs = rprime[1:] - rprime[:-1]
+    assert (diffs >= -1e-6).all()
+
+
+def test_nmda_hill_backward_compat():
+    """n_hill=1 should match the old sigmoid-based formula exactly."""
+    current = torch.linspace(0.0, 0.15, 50)
+    I_half, k = 0.0465, 0.0233
+    ca_new = nmda_calcium(current, I_half, k, n_hill=1.0)
+    ca_old = torch.sigmoid((current - I_half) / k)
+    assert torch.allclose(ca_new, ca_old)

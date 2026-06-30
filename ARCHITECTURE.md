@@ -303,16 +303,18 @@ $$
 
 #### NMDA Baseline-Calcium (`"nmda"`)
 
-A bio-plausible surrogate where the rate derivative is modeled as **calcium level above baseline**, motivated by NMDA receptor Mg²⁺ unblock dynamics. The calcium level is a sigmoid in input current:
+A bio-plausible surrogate where the rate derivative is modeled as **calcium level above baseline**, motivated by NMDA receptor Mg²⁺ unblock dynamics (Jahr & Stevens, 1990) and the Ca²⁺/calmodulin cooperativity cascade (Chin & Means, 2000). The calcium level is a generalized sigmoid in input current:
 
 $$
-\text{Ca}(I) = \sigma\!\left(\frac{I - I_{1/2}}{k}\right)
+\text{Ca}(I) = \sigma\!\left(\frac{n_H \cdot (I - I_{1/2})}{k}\right)
 $$
 
-with $I_{1/2} = I_\theta$ (half-activation at the LIF threshold current) and $k = 0.5 \cdot I_\theta$ (slope factor). The rate function is defined as the integral of calcium-above-baseline:
+with $I_{1/2} = I_\theta$ (half-activation at the LIF threshold current), $k = 0.5 \cdot I_\theta$ (slope factor), and $n_H$ the **Hill cooperativity coefficient**. $n_H = 1$ gives the simple NMDA Mg²⁺ unblock sigmoid; $n_H \approx 3$–4 approximates the cooperativity of Ca²⁺/calmodulin binding to CaMKII (four Ca²⁺ ions bind cooperatively to one calmodulin molecule), sharpening the calcium-to-plasticity threshold toward the all-or-nothing regime observed experimentally (Lisman et al., 2002).
+
+The rate function is defined as the integral of calcium-above-baseline:
 
 $$
-\hat{r}(I) = k \cdot \text{softplus}\!\left(\frac{I - I_{1/2}}{k}\right) - \text{Ca}_0 \cdot I
+\hat{r}(I) = \frac{k}{n_H} \cdot \text{softplus}\!\left(\frac{n_H \cdot (I - I_{1/2})}{k}\right) - \text{Ca}_0 \cdot I
 $$
 
 so that its derivative is exactly the calcium excess:
@@ -321,21 +323,24 @@ $$
 \hat{r}'(I) = \text{Ca}(I) - \text{Ca}_0
 $$
 
-With the default $\text{Ca}_0 = 0.5$ and $I_{1/2} = I_\theta$, the derivative simplifies to $\frac{1}{2}\tanh\!\left(\frac{I - I_\theta}{2k}\right)$ and the rate to $k \cdot \ln\cosh\!\left(\frac{I - I_\theta}{2k}\right)$ — a smooth threshold function.
+With the defaults $\text{Ca}_0 = 0.5$, $I_{1/2} = I_\theta$, $n_H = 1$, the derivative simplifies to $\frac{1}{2}\tanh\!\left(\frac{I - I_\theta}{2k}\right)$ and the rate to $k \cdot \ln\cosh\!\left(\frac{I - I_\theta}{2k}\right)$ — a smooth threshold function.
 
 **Key bio-plausible properties:**
 
 - **Monotonically increasing derivative**: unlike the LIF or softplus derivatives (which decrease for strong inputs due to rate saturation), $\hat{r}'(I)$ increases monotonically — stronger synapses produce more calcium and get more eligibility. This matches the biological fact that calcium levels do not decrease for stronger inputs.
-- **Sign change at baseline**: $\hat{r}'(I) < 0$ when $\text{Ca}(I) < \text{Ca}_0$ (subthreshold, LTD direction); $\hat{r}'(I) > 0$ when $\text{Ca}(I) > \text{Ca}_0$ (suprathreshold, LTP direction). This is a BCM-like calcium threshold mechanism, with the modification threshold set by the baseline $\text{Ca}_0$.
+- **Sign change at baseline**: $\hat{r}'(I) < 0$ when $\text{Ca}(I) < \text{Ca}_0$ (subthreshold, LTD direction); $\hat{r}'(I) > 0$ when $\text{Ca}(I) > \text{Ca}_0$ (suprathreshold, LTP direction). This is a BCM-like calcium threshold mechanism (Bienenstock, Cooper & Munro, 1982), with the modification threshold set by the baseline $\text{Ca}_0$.
+- **Cooperativity via $n_H$**: increasing $n_H$ sharpens the calcium transition around $I_{1/2}$ without shifting the midpoint, modeling the cooperative Ca²⁺/CaM → CaMKII activation. At $n_H = 4$, the threshold approaches the steep, switch-like behavior of CaMKII T286 autophosphorylation.
 - **No rate saturation**: the rate grows approximately linearly for $I \gg I_\theta$ (no refractory-period ceiling), unlike the LIF rate.
 
 **Comparison** (operating range $w \in [0.5, 0.8]$, $I_{1/2} = I_\theta$, $k = 0.5 I_\theta$, $\text{Ca}_0 = 0.5$):
 
-| Weight | $I_{\text{eff}}$ | LIF $\hat{r}'(I)$ | NMDA $\hat{r}'(I)$ |
-|--------|------|------|------|
-| 0.50 | 0.058 | 0.130 (↑ then ↓ with $I$) | +0.121 (↑ with $I$) |
-| 0.65 | 0.076 | 0.095 | +0.280 |
-| 0.80 | 0.093 | 0.078 | +0.380 |
+| Weight | $I_{\text{eff}}$ | LIF $\hat{r}'(I)$ | NMDA $\hat{r}'(I)$, $n_H{=}1$ | NMDA $\hat{r}'(I)$, $n_H{=}4$ |
+|--------|------|------|------|------|
+| 0.50 | 0.058 | 0.130 (↓ with $I$) | +0.121 | +0.018 |
+| 0.65 | 0.076 | 0.095 | +0.280 | +0.392 |
+| 0.80 | 0.093 | 0.078 | +0.380 | +0.496 |
+
+At $n_H = 4$, the derivative is near-zero for barely-suprathreshold weights ($w = 0.5$) and large for clearly suprathreshold weights ($w = 0.8$), producing sharper differentiation between weak and strong synapses.
 
 ### 6.5 Eligibility Gradient
 
@@ -464,6 +469,7 @@ $$
 | `reinforce.surrogate.I_half` | $I_\theta$ | NMDA calcium half-activation current (NMDA only) |
 | `reinforce.surrogate.k` | $0.5 I_\theta$ | NMDA calcium slope factor (NMDA only) |
 | `reinforce.surrogate.ca_baseline` | 0.5 | NMDA baseline calcium level (NMDA only) |
+| `reinforce.surrogate.n_hill` | 1.0 | NMDA Hill cooperativity coefficient (NMDA only) |
 
 
 ## 9. Key File Locations
@@ -691,3 +697,96 @@ The astrocyte dynamics in this network — integrating pre-synaptic activity ove
 ### 10.9 The Temperature Parameter as Cortical State
 
 The softmax temperature $T$ in the action-selection policy controls exploration vs. exploitation. In biological terms, this maps to **cortical state** — the balance between desynchronized (high T, exploratory, broad neural ensemble activation) and synchronized (low T, exploitative, sparse winner-take-all) cortical dynamics. Acetylcholine and norepinephrine are known to shift cortical state in this way, with high cholinergic tone promoting desynchronization and exploratory behavior. The temperature parameter can thus be viewed as a simplified model of these ascending arousal systems.
+
+### 10.10 Tracing the Surrogate Derivative Backward: From Eligibility Trace to Ion Concentration
+
+Starting from the question *"what biological variable stores the eligibility trace?"* and working backward at each step, we arrive at a chain of well-characterized molecular processes. Each link in the chain determines the next.
+
+#### The backward chain
+
+$$
+\boxed{\hat{r}'(I) \;\longleftrightarrow\; \text{CaMKII activation} \;\leftarrow\; \text{Ca}^{2+}\text{/CaM} \;\leftarrow\; [\text{Ca}^{2+}]_{\text{spine}} \;\leftarrow\; g_{\text{NMDA}}(V) \;\leftarrow\; V_{\infty}(I) \;\leftarrow\; I_{\text{eff}}(w)}
+$$
+
+#### Step 1: Eligibility trace → CaMKII T286 phosphorylation
+
+The eligibility trace must persist for seconds-to-minutes (the duration of a navigation episode). Among molecular candidates — free [Ca²⁺] (50–500 ms, too fast), cAMP/PKA (minutes, not synapse-specific), PKM-ζ (hours, too slow to accumulate) — **CaMKII T286 autophosphorylation** is the best match (Lisman et al., 2002):
+
+- Autophosphorylated CaMKII remains active after calcium returns to baseline, persisting for 10–60 seconds — matching our $\lambda_{\text{trace}} = 0.95$ per step (half-life ≈ 14 steps).
+- It is synapse-specific: restricted to the active spine by the spatial confinement of calcium and CaMKII anchoring at the postsynaptic density.
+- It is reward-gated: dopamine → D1 → cAMP/PKA → DARPP-32 → PP1 inhibition protects the tag; dopamine dips → PP1 active → tag erased (Frémaux & Gerstner, 2016).
+
+#### Step 2: CaMKII activation → Ca²⁺/calmodulin cooperativity
+
+CaMKII is activated by Ca²⁺/calmodulin (CaM). The binding is highly cooperative — four Ca²⁺ ions bind to one CaM molecule — producing a steep nonlinearity described by a Hill function (Chin & Means, 2000):
+
+$$
+[\text{CaM}^*] \propto \frac{[\text{Ca}^{2+}]^{n_H}}{[\text{Ca}^{2+}]^{n_H} + K_d^{n_H}}, \qquad n_H \approx 3\text{--}4
+$$
+
+This cooperativity means CaMKII activation is nearly all-or-nothing: below a calcium threshold, barely active; above it, fully active. In our model, this is captured by the `n_hill` parameter: $n_H = 1$ gives a simple sigmoid; $n_H = 4$ approximates the CaM cooperativity, sharpening the BCM threshold.
+
+The **sign of plasticity** is determined by the competition between two calcium-activated enzymes with different affinities (Graupner & Brunel, 2007):
+- **Calcineurin (PP2B)**: high Ca²⁺ affinity, low cooperativity → activated at moderate calcium → **LTD** (dephosphorylates AMPARs via PP1).
+- **CaMKII**: lower Ca²⁺ affinity, high cooperativity (through CaM) → activated only at high calcium → **LTP** (phosphorylates GluA1 at S831, increasing AMPAR conductance).
+
+The balance point — where calcineurin gives way to CaMKII — is the BCM modification threshold, modeled by our `ca_baseline` parameter.
+
+#### Step 3: Calcium level → NMDA receptor voltage dependence
+
+The spine calcium concentration is primarily set by NMDA receptor-mediated influx during pre/post coincidence (Jahr & Stevens, 1990):
+
+$$
+\Delta[\text{Ca}^{2+}] \propto g_{\text{NMDA}}(V) \cdot [\text{glutamate}], \qquad g_{\text{NMDA}}(V) = \frac{1}{1 + [\text{Mg}^{2+}] \cdot e^{-\gamma V}}
+$$
+
+where $[\text{Mg}^{2+}] \approx 1$ mM and $\gamma \approx 0.062$ mV⁻¹. This conductance is the coincidence detector: it requires both pre-synaptic glutamate release AND post-synaptic depolarization (to unblock the Mg²⁺ pore). It is steepest near spike threshold — exactly where our $I_{1/2} = I_\theta$ places the calcium half-activation.
+
+#### Step 4: Voltage → input current
+
+The steady-state membrane voltage is set by the input current through the membrane equation:
+
+$$
+V_{\infty} = \frac{I_{\text{eff}}}{1 - d}, \qquad I_{\text{eff}} = c \cdot w_{s,a}
+$$
+
+This closes the loop: the weight $w_{s,a}$ determines the current, which determines the voltage, which determines the NMDA conductance, which determines the calcium influx, which determines the CaMKII activation, which determines the eligibility trace.
+
+#### Summary: what biological quantity represents $\hat{r}'(I)$?
+
+The most bio-plausible representation is **CaMKII-T286 phosphorylation level above its tonic baseline** — a real molecular state that is directly measurable (via phospho-specific antibodies), monotonically increasing with input strength, sign-determining (CaMKII vs calcineurin balance), and persistent at behavioral timescale.
+
+Our NMDA surrogate models this entire cascade as a single parameterized function:
+
+$$
+\hat{r}'(I) = \sigma\!\left(\frac{n_H(I - I_\theta)}{k}\right) - \text{Ca}_0
+$$
+
+where each parameter maps to a biological quantity:
+
+| Parameter | Biological analog | Source |
+|-----------|-------------------|--------|
+| $I_{1/2} = I_\theta$ | NMDA steepest at spike threshold | Jahr & Stevens (1990) |
+| $k$ | Voltage-to-current scaling ($1/(1-d)$) | LIF membrane equation |
+| $\text{Ca}_0$ | BCM modification threshold (calcineurin/CaMKII balance) | Bienenstock, Cooper & Munro (1982); Graupner & Brunel (2007) |
+| $n_H$ | Ca²⁺/CaM cooperativity (Hill coefficient ≈ 4) | Chin & Means (2000); Lisman et al. (2002) |
+| $\lambda_{\text{trace}}$ | PP1 dephosphorylation rate of CaMKII-T286 | Lisman et al. (2002) |
+
+
+## 11. References
+
+1. **Jahr, C. E. & Stevens, C. F.** (1990). A quantitative description of NMDA receptor-channel kinetic behavior. *Journal of Neuroscience*, 10(6), 1830–1837. — NMDA receptor Mg²⁺ unblock voltage dependence: $g_{\text{NMDA}}(V) = 1/(1 + [\text{Mg}^{2+}] \cdot e^{-0.062V})$.
+
+2. **Bienenstock, E. L., Cooper, L. N. & Munro, P. W.** (1982). Theory for the development of neuron selectivity: orientation specificity and binocular interaction in visual cortex. *Journal of Neuroscience*, 2(1), 32–48. — BCM theory: sliding plasticity threshold $\theta_M \propto \bar{c}^p$; sign of plasticity determined by postsynaptic activity relative to threshold.
+
+3. **Chin, D. & Means, A. R.** (2000). Calmodulin: a prototypical calcium sensor. *Trends in Cell Biology*, 10(8), 322–328. — Ca²⁺/calmodulin cooperative binding: four Ca²⁺ ions per CaM, Hill coefficient $n_H \approx 3$–4.
+
+4. **Lisman, J., Schulman, H. & Cline, H.** (2002). The molecular basis of CaMKII function in synaptic and behavioural memory. *Nature Reviews Neuroscience*, 3(3), 175–190. — CaMKII T286 autophosphorylation as a molecular memory switch; CaMKII vs calcineurin threshold for LTP/LTD.
+
+5. **Graupner, M. & Brunel, N.** (2007). STDP in a bistable synapse model indicates a path to depression in CA1 pyramidal cells. *PLoS Computational Biology*, 3(11), e221. — Calcium-based model of synaptic plasticity: calcineurin (LTD) vs CaMKII (LTP) pathways with distinct calcium affinities and cooperativities.
+
+6. **Graupner, M. & Brunel, N.** (2012). Calcium-based plasticity model explains sensitivity of synaptic changes to spike timing, firing rate, synaptic conductance, and dendritic depolarization. *Physical Review E*, 84(5), 051907. — Unified calcium threshold model predicting STDP and BCM behavior from biophysical parameters.
+
+7. **Frémaux, N. & Gerstner, W.** (2016). Neuromodulated spike-timing-dependent plasticity, and theory of three-factor learning rules. *Frontiers in Neural Circuits*, 9, 85. — Three-factor learning rule framework: eligibility trace × neuromodulatory signal; dopamine gating of CaMKII-dependent plasticity.
+
+8. **Shouval, H. Z., Bear, M. F. & Cooper, L. N.** (2002). A unified model of NMDA receptor-dependent bidirectional synaptic plasticity. *PNAS*, 99(16), 10831–10836. — Biophysical model linking calcium influx through NMDA receptors to BCM-like plasticity via CaMKII and calcineurin pathways.

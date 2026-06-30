@@ -251,6 +251,7 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
             "I_half": surr_cfg.get("I_half", I_theta_default),
             "k": surr_cfg.get("k", 0.5 * I_theta_default),
             "ca_baseline": surr_cfg.get("ca_baseline", 0.5),
+            "n_hill": surr_cfg.get("n_hill", 1.0),
         }
     else:
         raise ValueError(f"Unknown surrogate type: {surrogate_kind!r}")
