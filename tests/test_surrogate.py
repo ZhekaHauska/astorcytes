@@ -328,3 +328,31 @@ def test_nmda_hill_backward_compat():
     ca_new = nmda_calcium(current, I_half, k, n_hill=1.0)
     ca_old = torch.sigmoid((current - I_half) / k)
     assert torch.allclose(ca_new, ca_old)
+
+
+# ---------------------------------------------------------------------------
+# 9. Spike-based eligibility (reward-modulated Hebbian mode)
+# ---------------------------------------------------------------------------
+
+def test_spike_eligibility_sign_and_magnitude():
+    """The spike-based eligibility grad_slice should have correct sign and
+    be proportional to spike counts normalized by time_steps."""
+    time_steps = 1000
+    spike_counts = torch.tensor([3.0, 0.0, 7.0, 5.0, 1.0])
+    probs = torch.tensor([0.15, 0.05, 0.40, 0.30, 0.10])
+    chosen_idx = 2
+
+    spike_rates = spike_counts / time_steps
+    onehot = torch.zeros_like(probs)
+    onehot[chosen_idx] = 1.0
+    grad_slice = (onehot - probs) * spike_rates
+
+    assert grad_slice[chosen_idx] > 0, "Chosen action with spikes should have positive eligibility"
+    for i in range(len(probs)):
+        if i != chosen_idx and spike_counts[i] > 0:
+            assert grad_slice[i] < 0, "Non-chosen action with spikes should have negative eligibility"
+        if spike_counts[i] == 0:
+            assert grad_slice[i] == 0.0, "Zero-spike action should have zero eligibility"
+
+    expected_chosen = (1.0 - probs[chosen_idx]) * (spike_counts[chosen_idx] / time_steps)
+    assert abs(grad_slice[chosen_idx].item() - expected_chosen) < 1e-8

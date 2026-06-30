@@ -125,11 +125,13 @@ def setup_and_run_simulation_reinforce(
     conn_XY.running_baseline = running_baseline
     mask_tensor = torch.Tensor(weights_mask_XY).float()
 
-    surrogate_c = compute_scale_c(conn_XY.impulse_amplitude, conn_XY.impulse_length,
-                                  conn_XY.impulse_shape_factor, conn_XY.invert,
-                                  intensity, time_steps)
-    if surrogate_params is None:
-        surrogate_params = build_lif_params(thresh, dt, float(output_layer.tc_decay), refrac)
+    use_surrogate = surrogate_kind != "spike"
+    if use_surrogate:
+        surrogate_c = compute_scale_c(conn_XY.impulse_amplitude, conn_XY.impulse_length,
+                                      conn_XY.impulse_shape_factor, conn_XY.invert,
+                                      intensity, time_steps)
+        if surrogate_params is None:
+            surrogate_params = build_lif_params(thresh, dt, float(output_layer.tc_decay), refrac)
 
     start = t()
     positions = []
@@ -167,10 +169,16 @@ def setup_and_run_simulation_reinforce(
         if new_position == goal:
             step_reward += reward_goal
 
-        w_slice = network.connections['X_Y'].w.data[current_position, adjacent_positions]
-        I_eff = surrogate_c * w_slice
-        grad_slice = eligibility_gradient(adjacent_positions, chosen_idx, I_eff, surrogate_c,
-                                          temperature, surrogate_kind, surrogate_params)
+        if use_surrogate:
+            w_slice = network.connections['X_Y'].w.data[current_position, adjacent_positions]
+            I_eff = surrogate_c * w_slice
+            grad_slice = eligibility_gradient(adjacent_positions, chosen_idx, I_eff, surrogate_c,
+                                              temperature, surrogate_kind, surrogate_params)
+        else:
+            spike_rates = spike_prefs / time_steps
+            onehot = torch.zeros_like(probs)
+            onehot[chosen_idx] = 1.0
+            grad_slice = (onehot - probs) * spike_rates
         conn_XY.accumulate_trace(current_position, adjacent_positions, grad_slice, step_reward)
         network.connections['X_Y'].w.data *= mask_tensor
         current_position = new_position
@@ -253,6 +261,8 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
             "ca_baseline": surr_cfg.get("ca_baseline", 0.5),
             "n_hill": surr_cfg.get("n_hill", 1.0),
         }
+    elif surrogate_kind == "spike":
+        surrogate_params = None
     else:
         raise ValueError(f"Unknown surrogate type: {surrogate_kind!r}")
 

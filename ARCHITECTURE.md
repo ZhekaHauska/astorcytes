@@ -342,6 +342,29 @@ With the defaults $\text{Ca}_0 = 0.5$, $I_{1/2} = I_\theta$, $n_H = 1$, the deri
 
 At $n_H = 4$, the derivative is near-zero for barely-suprathreshold weights ($w = 0.5$) and large for clearly suprathreshold weights ($w = 0.8$), producing sharper differentiation between weak and strong synapses.
 
+#### Spike-Based Eligibility (`"spike"`)
+
+A reward-modulated Hebbian mode that bypasses the analytical surrogate entirely. Instead of computing $\hat{r}'(I_{\text{eff}}) \cdot c$, the eligibility signal uses the **actual spike count** $n_a$ recorded from the SNN simulation:
+
+$$
+\text{eligibility}_a = \bigl(\mathbb{1}[a = a^*] - \pi(a)\bigr) \cdot \frac{n_a}{\text{time\_steps}}
+$$
+
+The score function $(\mathbb{1}[a=a^*] - \pi(a))$ is retained for credit assignment (chosen actions strengthened, non-chosen weakened). The spike count — normalized to a firing rate — replaces the analytical derivative as the magnitude signal.
+
+**Tradeoffs vs surrogate modes:**
+
+| Property | Surrogate (`lif`, `nmda`, ...) | Spike-based |
+|----------|-------------------------------|-------------|
+| Eligibility signal | Analytical $\hat{r}'(I) \cdot c$ | Empirical $n_a / \text{time\_steps}$ |
+| Captures full SNN dynamics | No (first-order $I_{\text{eff}}$ only) | **Yes** (impulse waveform, refrac, astrocyte, inhibition) |
+| Differentiable w.r.t. $w$ | Yes | No |
+| Policy gradient guarantee | Yes | No (score-weighted Hebbian) |
+| Subthreshold synapses | Can strengthen silent synapses | Cannot (zero spikes → zero eligibility) |
+| Extra computation | Surrogate formula | None (spikes already computed) |
+
+The spike-based mode is the most bio-plausible option — the eligibility signal IS the post-synaptic activity, gated by the score function for credit assignment. It captures all network dynamics (including astrocyte modulation, inhibition, refractory effects) that the analytical $I_{\text{eff}}$ approximation ignores. However, it cannot reinforce synapses whose neurons did not fire ($n_a = 0 \Rightarrow \text{eligibility} = 0$), limiting its ability to discover new pathways.
+
 ### 6.5 Eligibility Gradient
 
 The REINFORCE score function through the surrogate rate, per candidate action $a$:
@@ -462,7 +485,7 @@ $$
 
 | Config Key | Default | Description |
 |------------|---------|-------------|
-| `reinforce.surrogate.type` | `"lif"` | Surrogate kind: `"lif"`, `"softplus"`, or `"nmda"` |
+| `reinforce.surrogate.type` | `"lif"` | Surrogate kind: `"lif"`, `"softplus"`, `"nmda"`, or `"spike"` |
 | `reinforce.surrogate.tc_decay` | 150.0 | LIF membrane time constant (LIF only) |
 | `reinforce.surrogate.scale` | 1.0 | Softplus steepness (softplus only) |
 | `reinforce.surrogate.I_theta` | derived | Softplus knee current (softplus only) |
