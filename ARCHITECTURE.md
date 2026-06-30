@@ -267,7 +267,7 @@ For default parameters: $c = 7.75 \times 15 / 1000 = 0.116$.
 
 ### 6.4 Surrogate Rate Functions
 
-Two surrogates are available (config-selectable via `surrogate.type`):
+Three surrogates are available (config-selectable via `surrogate.type`):
 
 #### LIF Analytical Rate (`"lif"`)
 
@@ -300,6 +300,42 @@ $$
 $$
 \hat{r}'(I) = \text{scale} \cdot \sigma\bigl(\text{scale} \cdot (I - I_\theta)\bigr)
 $$
+
+#### NMDA Baseline-Calcium (`"nmda"`)
+
+A bio-plausible surrogate where the rate derivative is modeled as **calcium level above baseline**, motivated by NMDA receptor Mg²⁺ unblock dynamics. The calcium level is a sigmoid in input current:
+
+$$
+\text{Ca}(I) = \sigma\!\left(\frac{I - I_{1/2}}{k}\right)
+$$
+
+with $I_{1/2} = I_\theta$ (half-activation at the LIF threshold current) and $k = 0.5 \cdot I_\theta$ (slope factor). The rate function is defined as the integral of calcium-above-baseline:
+
+$$
+\hat{r}(I) = k \cdot \text{softplus}\!\left(\frac{I - I_{1/2}}{k}\right) - \text{Ca}_0 \cdot I
+$$
+
+so that its derivative is exactly the calcium excess:
+
+$$
+\hat{r}'(I) = \text{Ca}(I) - \text{Ca}_0
+$$
+
+With the default $\text{Ca}_0 = 0.5$ and $I_{1/2} = I_\theta$, the derivative simplifies to $\frac{1}{2}\tanh\!\left(\frac{I - I_\theta}{2k}\right)$ and the rate to $k \cdot \ln\cosh\!\left(\frac{I - I_\theta}{2k}\right)$ — a smooth threshold function.
+
+**Key bio-plausible properties:**
+
+- **Monotonically increasing derivative**: unlike the LIF or softplus derivatives (which decrease for strong inputs due to rate saturation), $\hat{r}'(I)$ increases monotonically — stronger synapses produce more calcium and get more eligibility. This matches the biological fact that calcium levels do not decrease for stronger inputs.
+- **Sign change at baseline**: $\hat{r}'(I) < 0$ when $\text{Ca}(I) < \text{Ca}_0$ (subthreshold, LTD direction); $\hat{r}'(I) > 0$ when $\text{Ca}(I) > \text{Ca}_0$ (suprathreshold, LTP direction). This is a BCM-like calcium threshold mechanism, with the modification threshold set by the baseline $\text{Ca}_0$.
+- **No rate saturation**: the rate grows approximately linearly for $I \gg I_\theta$ (no refractory-period ceiling), unlike the LIF rate.
+
+**Comparison** (operating range $w \in [0.5, 0.8]$, $I_{1/2} = I_\theta$, $k = 0.5 I_\theta$, $\text{Ca}_0 = 0.5$):
+
+| Weight | $I_{\text{eff}}$ | LIF $\hat{r}'(I)$ | NMDA $\hat{r}'(I)$ |
+|--------|------|------|------|
+| 0.50 | 0.058 | 0.130 (↑ then ↓ with $I$) | +0.121 (↑ with $I$) |
+| 0.65 | 0.076 | 0.095 | +0.280 |
+| 0.80 | 0.093 | 0.078 | +0.380 |
 
 ### 6.5 Eligibility Gradient
 
@@ -421,10 +457,13 @@ $$
 
 | Config Key | Default | Description |
 |------------|---------|-------------|
-| `reinforce.surrogate.type` | `"lif"` | Surrogate kind: `"lif"` or `"softplus"` |
+| `reinforce.surrogate.type` | `"lif"` | Surrogate kind: `"lif"`, `"softplus"`, or `"nmda"` |
 | `reinforce.surrogate.tc_decay` | 150.0 | LIF membrane time constant (LIF only) |
 | `reinforce.surrogate.scale` | 1.0 | Softplus steepness (softplus only) |
 | `reinforce.surrogate.I_theta` | derived | Softplus knee current (softplus only) |
+| `reinforce.surrogate.I_half` | $I_\theta$ | NMDA calcium half-activation current (NMDA only) |
+| `reinforce.surrogate.k` | $0.5 I_\theta$ | NMDA calcium slope factor (NMDA only) |
+| `reinforce.surrogate.ca_baseline` | 0.5 | NMDA baseline calcium level (NMDA only) |
 
 
 ## 9. Key File Locations
@@ -439,3 +478,216 @@ $$
 | `astrocites/experiment.py` | `setup_and_run_simulation()`, `setup_and_run_simulation_reinforce()`, `run_experiment()` |
 | `configs/default.yaml` | Default parameter configuration |
 | `tests/test_surrogate.py` | Autograd verification of surrogate derivatives and eligibility gradient |
+
+
+## 10. Biological Interpretation
+
+This section speculates on how the mathematical machinery above maps onto known neurobiology. These are analogies, not claims about the implementation's biological accuracy — but they motivate the architecture and suggest directions for future refinement.
+
+### 10.1 The Three-Factor Rule
+
+The REINFORCE update:
+
+$$
+\Delta w_{ij} = \eta_{\text{RL}} \cdot \underbrace{(G - \bar{b})}_{\text{factor 3: neuromodulator}} \cdot \underbrace{E_{ij}}_{\text{factors 1+2: Hebbian eligibility}}
+$$
+
+is an instance of a **three-factor learning rule**, a framework widely proposed for biological reinforcement learning (Frémaux & Gerstner, 2016). The three factors are:
+
+1. **Pre-synaptic activity** — encoded in $I_{\text{eff}}(a) = c \cdot w_{s,a}$, which depends on whether the pre-synaptic neuron (at the current position) is spiking.
+2. **Post-synaptic activity** — encoded in the surrogate rate $\hat{r}(I_{\text{eff}}(a))$, which predicts the post-synaptic neuron's firing probability.
+3. **Neuromodulatory signal** — the advantage $A = G - \bar{b}$, broadcast globally to all synapses.
+
+In the mammalian brain, this architecture is most clearly realized in the **striatum**: cortico-striatal synapses carry factors 1 and 2 (glutamatergic pre/post coincidence), while dopaminergic projections from the VTA/SNc deliver factor 3. Synaptic plasticity is gated by the convergence of cortical input and dopamine — without dopamine, Hebbian coincidence alone produces weak or transient changes; with dopamine, those changes are consolidated.
+
+### 10.2 Eligibility Traces as Synaptic Tags
+
+The eligibility trace:
+
+$$
+E_{ij}[t] = \lambda_{\text{trace}} \cdot E_{ij}[t-1] + \nabla_{w_{ij}} \log \pi(a^*[t])
+$$
+
+serves as a **temporary synaptic tag** that marks a synapse as "recently relevant" for future modulation. This is directly analogous to the molecular eligibility traces hypothesized in biological synapses. The three operations — decay, gradient increment, and reward-gated readout — each map onto distinct biochemical processes, organized as a **cascade of increasing timescale**:
+
+$$
+\text{NMDA}/\text{Ca}^{2+} \xrightarrow{\sim 50\text{ ms}} \text{CaMKII} \xrightarrow{\sim 30\text{ s}} \text{PKM-}\zeta \xrightarrow{\text{hours}} \text{Structural plasticity}
+$$
+
+#### Exponential decay: calcium extrusion and CaMKII dephosphorylation
+
+The decay $\lambda_{\text{trace}} \cdot E[t-1]$ is implemented by two parallel first-order processes:
+
+- **Fast (per-spike, ~50–500 ms):** Calcium entering through NMDA receptors is extruded by PMCA (plasma membrane Ca²⁺-ATPase) and NCX (Na⁺–Ca²⁺ exchanger). The extrusion follows approximately first-order kinetics, $[\text{Ca}^{2+}][t] \propto e^{-t/\tau_{\text{ext}}}$, providing the short-timescale decay.
+- **Slow (per-step, ~10–60 s):** CaMKII, once autophosphorylated at T286 by a strong calcium transient, remains autonomously active after calcium returns to baseline. It is gradually dephosphorylated by PP1 (protein phosphatase 1) with first-order kinetics, giving $P_{\text{CaMKII}}[t] \propto e^{-t/\tau_{\text{PP1}}}$. This is the molecular analog of our $\lambda_{\text{trace}} = 0.95$ per step (effective half-life ≈ 14 steps).
+
+The two-tier decay means the biological eligibility signal is actually a **sum of two exponentials** (fast calcium + slow CaMKII), not a single exponential as in our model. A double-exponential trace could capture both intra-step (spike-level coincidence) and inter-step (action-level credit) timescales — a potential model refinement.
+
+#### Gradient increment: NMDA-mediated calcium influx
+
+Each time the pre-synaptic neuron spikes and the post-synaptic membrane is depolarized, NMDA receptors admit calcium into the spine. The influx magnitude at synapse $i$ is:
+
+$$
+\Delta\text{Ca}_i \propto g_{\text{NMDA}}(V_{\text{post}}) \cdot s_{\text{pre},i}
+$$
+
+Since $g_{\text{NMDA}}(V)$ is steepest near threshold (Section 10.5), the calcium influx naturally encodes the surrogate derivative $\hat{r}'(I_{\text{eff}})$: synapses whose input brings the post-synaptic neuron near threshold produce maximal calcium, while far-subthreshold synapses produce little. The calcium is added to the spine's residual pool, incrementing the eligibility tag. This is the biophysical implementation of the accumulation $+ \hat{r}'(I_{\text{eff}}) \cdot c$.
+
+#### The score function $(\mathbb{1}[a=a^*] - \pi(a))$: Hebbian coincidence and competition
+
+This term has two components requiring different mechanisms:
+
+**Positive component $\mathbb{1}[a=a^*]$:** The post-synaptic neuron that drove the chosen action was highly active → strong depolarization → strong NMDA activation → large calcium influx → strong positive eligibility increment. This is standard Hebbian coincidence detection, implemented by every NMDA-dependent plasticity mechanism.
+
+**Negative component $-\pi(a)$:** This is the competitive normalization — all candidate synapses receive a negative (depressive) contribution proportional to their action probability. Three candidate mechanisms:
+
+- **Lateral inhibition (our layer I):** The inhibitor layer provides recurrent inhibition to Y proportional to overall population activity. This inhibition hyperpolarizes non-chosen neurons, reducing their NMDA activation and calcium influx. The net calcium signal at each synapse becomes $g_{\text{NMDA}}(V_a^{\text{exc}} - V_a^{\text{inh}}) \cdot s_{\text{pre}}$, approximating the subtraction of expected activity.
+- **Tonic dopamine baseline:** If tonic dopamine sets a zero-advantage baseline, the expected weight change averages to zero across episodes. The $-\pi(a)$ term ensures this cancellation at the trace level; tonic dopamine achieves a similar normalization in expectation.
+- **Short-term synaptic depression:** Frequently-active release sites deplete readily releasable vesicle pools. A synapse supporting a high-$\pi(a)$ neuron has been releasing frequently → depleted → reduced effective calcium per spike → naturally reduced eligibility, implementing an implicit $-\pi(a)$ scaling through vesicle dynamics on a seconds timescale.
+
+#### Cross-step accumulation: PKM-ζ as the slow trace
+
+The deepest challenge is that our eligibility trace accumulates across **navigation steps** (each separated by seconds of real time), but calcium and CaMKII decay too fast to bridge this gap. The biological candidate for the slow accumulating trace is **PKM-ζ (protein kinase M zeta)**:
+
+- PKM-ζ is a constitutively active fragment of PKC that is *synthesized* (not just activated) in response to strong plasticity induction. Its expression follows the cascade CaMKII → MAPK → CREB → local PKM-ζ mRNA translation at the synapse.
+- Once synthesized, PKM-ζ persistently increases AMPA receptor trafficking to the potentiated synapse, maintaining LTP for hours.
+- PKM-ζ synthesis rate is proportional to the CaMKII tag strength — so the PKM-ζ level *integrates* the history of recent CaMKII activation across multiple events, with synthesis adding and degradation (proteasome) providing the leak.
+- This maps directly to $E[t] = \lambda \cdot E[t-1] + \nabla_w \log\pi$: PKM-ζ protein level is the eligibility state $E$, its degradation is $\lambda$, and CaMKII-driven synthesis is the gradient increment.
+
+#### Reward readout: the dopamine × tag AND gate
+
+When the episode ends and the advantage $A = G - \bar{b}$ arrives as a dopamine signal, it gates consolidation of the molecular tag:
+
+- **$A > 0$ (dopamine burst):** D1 receptor activation → cAMP ↑ → PKA → DARPP-32 → PP1 inhibition → CaMKII protected → PKM-ζ synthesis proceeds → LTP consolidated. The magnitude is proportional to both dopamine ($A$) and the tag ($E$) — a **biochemical AND gate**.
+- **$A < 0$ (dopamine dip):** Reduced D1 activation → PP1 active → CaMKII dephosphorylated → calcineurin (PP2B) activated → AMPAR dephosphorylation → LTD.
+- **$A \approx 0$:** Tag decays normally → no PKM-ζ synthesis → no lasting change.
+
+Neither signal alone produces lasting change; both must be present — the molecular implementation of the multiplication $A \cdot E$.
+
+#### Summary: a multi-tier cascade, not a single number
+
+The eligibility trace is **not stored as a single scalar** at each synapse. It is distributed across a cascade of molecular states with increasing timescale and decreasing reversibility:
+
+| Model variable | Biological analog | Timescale | Mechanism |
+|----------------|-------------------|-----------|-----------|
+| Per-spike gradient $\hat{r}'(I) \cdot c$ | Ca²⁺ influx | ~50 ms | NMDA conductance × Mg²⁺ unblock |
+| Per-step tag (fast decay) | CaMKII T286 phosphorylation | ~30 s | Autophosphorylation / PP1 dephosphorylation |
+| Cross-step trace $E$ (slow decay) | PKM-ζ protein level | minutes–hours | mRNA translation / proteasome degradation |
+| $\lambda_{\text{trace}}$ decay | Tag decay | seconds–minutes | Ca²⁺ extrusion, PP1, proteasome |
+| $(\mathbb{1}[a=a^*])$ positive score | Hebbian coincidence | per-spike | Pre × post depolarization → Ca²⁺ |
+| $(-\pi(a))$ negative score | Competitive normalization | per-step | Lateral inhibition, vesicle depletion |
+| $A \cdot E$ reward gating | DA × tag AND gate | episode end | D1/cAMP/PKA/DARPP-32 × CaMKII/PKM-ζ |
+| Reset after REINFORCE update | Tag consumption | per-episode | Consolidation stabilizes AMPAR; tag role complete |
+
+The single-exponential trace in our implementation is a mathematical simplification of this multi-tier biochemical cascade.
+
+### 10.3 Advantage as Dopamine Reward Prediction Error
+
+The advantage $A = G - \bar{b}$ is the **reward prediction error** (RPE). Its biological counterpart is the phasic firing of midbrain dopamine neurons:
+
+- **Positive advantage** ($A > 0$): outcome exceeds expectation → dopamine burst → potentiates eligible synapses (LTP). In our model: $w \mathrel{+}= \eta \cdot A^+ \cdot E$, strengthening connections that contributed to the rewarded trajectory.
+- **Negative advantage** ($A < 0$): outcome falls short → dopamine dip (pause in tonic firing) → depresses eligible synapses (LTD). In our model: $w \mathrel{+}= \eta \cdot A^- \cdot E$, weakening connections that led to the penalized trajectory.
+- **Zero advantage** ($A \approx 0$): outcome matches expectation → no phasic dopamine → no net change. The synapse's Hebbian tag decays uneventfully.
+
+The running baseline $\bar{b}$ (updated with $\beta_b = 0.01$, a slow EMA) plays the role of the brain's **learned reward expectation** — analogous to the reward prediction encoded in the activity of striatal medium spiny neurons and orbitofrontal cortex, which gradually adapts to the statistics of the environment. The fact that dopamine neurons signal RPE (not absolute reward) is one of the most robust findings in systems neuroscience (Schultz, 1998), and our advantage formulation replicates this exactly.
+
+### 10.4 Surrogate Gradient as f-I Curve Sensitivity
+
+The surrogate rate $\hat{r}(I_{\text{eff}})$ and its derivative $\hat{r}'(I_{\text{eff}})$ have a natural biological reading:
+
+- The **firing rate vs. current (f-I) curve** of a biological neuron is smooth and sigmoidal — it does not have the discontinuous step of an idealized spike threshold. This smoothness arises from noise (ion channel stochasticity, synaptic noise), adaptation currents, and the fact that biological circuits operate in a fluctuation-driven regime where the concept of a fixed threshold is an approximation.
+- The **surrogate rate** $\hat{r}(I)$ approximates this smooth f-I relationship. By using it for gradient computation while keeping hard spikes for dynamics, we are effectively saying: "the neuron's output is a spike train, but the *sensitivity* of its output to input changes is well-approximated by the slope of its f-I curve."
+- The **derivative** $\hat{r}'(I_{\text{eff}}(a))$ in the eligibility gradient encodes how much a small increase in weight $w_{s,a}$ would increase the post-synaptic firing rate. Biologically, this is related to the concept of **synaptic efficacy** — how effectively a pre-synaptic input can drive the post-synaptic neuron. Synapses far below threshold ($I_{\text{eff}} \ll I_\theta$) have near-zero $\hat{r}'$ (subthreshold, negligible influence on output), while synapses near threshold have high $\hat{r}'$ (maximal influence). This mirrors the experimentally observed gradient of synaptic influence around the post-synaptic neuron's firing threshold.
+
+The divergence of $\hat{r}'(I)$ near $I_\theta$ (Section 6.4) is biologically interesting: it implies that synapses operating right at the post-synaptic threshold are the most "educable" — small weight changes produce maximal changes in output. This resonates with the notion of **metaplasticity** (Abraham, 2008), where synapses near threshold exhibit the highest plasticity because they are at the boundary between silent and active states, where the neuron is most sensitive to synaptic modifications.
+
+### 10.5 How the Surrogate Derivative Could Be Implemented in the Brain
+
+The surrogate derivative $\hat{r}'(I_{\text{eff}}) \cdot c$ answers a specific question at each synapse: *"how much does a change in my strength alter the post-synaptic neuron's output?"* The brain never evaluates this expression symbolically. Instead, the same sensitivity structure **emerges from biophysics** through several convergent mechanisms.
+
+#### NMDA receptor voltage dependence — the built-in $\hat{r}'$ gate
+
+The NMDA receptor conductance is magnesium-blocked at rest and progressively unblocks as the membrane depolarizes:
+
+$$
+g_{\text{NMDA}}(V) \propto \frac{1}{1 + [\text{Mg}^{2+}] \cdot e^{-V / 16.13}}
+$$
+
+This sigmoid is steepest right around spike threshold — precisely where $\hat{r}'(I)$ peaks in the surrogate. A synapse whose input brings the post-synaptic neuron *near* threshold produces maximal NMDA-mediated calcium influx; a far-subthreshold synapse produces almost none. The NMDA receptor doesn't "differentiate" the rate function — its biophysics gates calcium (and thus plasticity) in a pattern that naturally tracks the sensitivity profile of $\hat{r}'(I)$. This is the closest single-molecule analog to the surrogate derivative.
+
+#### Calcium as the analog of $\hat{r}'$ magnitude
+
+Post-synaptic calcium is the master variable controlling plasticity direction and magnitude (BCM theory; Bienenstock, Cooper & Munro, 1982):
+
+- Low $[\text{Ca}^{2+}]$ → no change
+- Moderate $[\text{Ca}^{2+}]$ → LTD (phosphatase pathway: calcineurin → PP1)
+- High $[\text{Ca}^{2+}]$ → LTP (kinase pathway: CaMKII → AMPA insertion)
+
+The calcium level at a given synapse depends on both glutamate binding and post-synaptic voltage (via NMDA receptors and voltage-gated Ca²⁺ channels). Near threshold, voltage fluctuations are amplified into large calcium transients — the calcium signal *embodies* $\hat{r}'(I)$: it encodes how effectively the synapse can influence the output. A subthreshold synapse sees little calcium (weak eligibility); a threshold-proximal synapse sees maximal calcium (strong eligibility). The sign (LTP vs LTD) is then set by the reward signal — the $(G - \bar{b})$ gating.
+
+#### Dendritic nonlinearities compute the local rate curve
+
+Pyramidal neuron dendrites are not passive cables — they possess active conductances (voltage-gated Na⁺, Ca²⁺ channels, NMDA spikes) that produce **local nonlinear integration**. Each dendritic branch computes a smooth input-output function:
+
+$$
+V_{\text{dendrite}} = f\!\left(\sum_i w_i \cdot s_i\right)
+$$
+
+where $f$ is differentiable (softened by channel noise and the spatially distributed NMDA receptors along the branch). Plasticity at each spine depends on the local dendritic voltage — a differentiable function of the local input. The dendrite thus implements, in analog hardware, exactly the kind of smooth input-output curve the surrogate models. The "derivative" is computed implicitly by the voltage dependence of NMDA receptors and Ca²⁺ channels within that branch, without any symbolic operation.
+
+#### Membrane voltage as a rate proxy
+
+At the single-synapse level, there is no access to the instantaneous firing rate. But there *is* access to the **post-synaptic membrane voltage** — a low-pass filtered integral of recent spike history. The voltage naturally encodes the recent rate, and voltage-dependent plasticity mechanisms (NMDA unblock, voltage-gated Ca²⁺ channels) effectively compute $d(\text{rate}) / d(\text{input})$ by responding to how much the voltage changes when input changes. The surrogate rate $\hat{r}(I)$ is an analytical model of what the voltage-encoded rate looks like at steady state.
+
+#### The eligibility trace as molecular memory
+
+Our eligibility trace accumulates the derivative over time with exponential decay ($\lambda_{\text{trace}} = 0.95$). The biological analog is the **residual calcium / CaMKII autophosphorylation** tag:
+
+- NMDA-mediated calcium entry creates a transient tag that persists after the pre/post spikes have passed.
+- CaMKII transitions to an autonomously active (autophosphorylated) state during high calcium, maintaining activity for seconds after the calcium decays — functioning as the "memory" of the derivative magnitude.
+- The tag strength is proportional to the calcium transient amplitude, which (via the mechanisms above) is proportional to $\hat{r}'(I)$.
+- When the reward / dopamine signal arrives later, it interacts with this tag — the three-factor convergence at the biochemical level.
+
+#### Summary: the derivative is embodied, not computed
+
+| Mathematical model | Biological analog | Mechanism |
+|--------------------|-------------------|-----------|
+| $\hat{r}'(I)$ magnitude → eligibility strength | $[\text{Ca}^{2+}]$ amplitude → tag strength | NMDA + VGCC calcium influx |
+| $\hat{r}'(I) = \text{Ca}(I) - \text{Ca}_0$ (NMDA surrogate) | Calcium above tonic baseline | NMDA Mg²⁺ unblock minus resting Ca²⁺ |
+| Sign change at $I_\theta$ (LTD ↔ LTP) | BCM modification threshold | Calcineurin (low Ca) vs CaMKII (high Ca) |
+| $\hat{r}(I)$ smooth f-I curve | Dendritic spike rate | Active dendritic conductances |
+| $c$ (weight → current) | Synaptic conductance → EPSP amplitude | Ohm's law at the synapse |
+| $(G - \bar{b}) \cdot E$ three-factor rule | DA × Ca²⁺ tag convergence | D1/D2 receptor + CaMKII interaction |
+| Trace decay $\lambda_{\text{trace}}$ | Tag lifetime | CaMKII dephosphorylation, Ca²⁺ extrusion |
+
+The brain does not evaluate $\hat{r}'(I_{\text{eff}}) \cdot c$ as a formula. Ion channel biophysics produce a gating signal (calcium) whose amplitude naturally tracks the sensitivity of the neuron's output to each synapse's input. The NMDA baseline-calcium surrogate (`"nmda"` type) makes this mapping explicit: the derivative $\hat{r}'(I) = \text{Ca}(I) - \text{Ca}_0$ is modeled directly as calcium above a tonic baseline, with a BCM-like sign change at threshold driven by the baseline subtraction rather than by a sigmoid-saturation artifact. The mathematical surrogate is a **phenomenological model** of processes the brain implements through membrane dynamics and molecular signaling cascades.
+
+### 10.6 Decoupled Surrogate and the Forward-Model Hypothesis
+
+Our architecture uses **actual spikes for action selection** but a **surrogate rate for gradient computation** — the two are decoupled. This has an intriguing biological parallel in the **forward model / efference copy** framework:
+
+- In motor control, the cerebellum maintains forward models that predict the sensory consequences of motor commands. These predictions enable rapid error-based learning (the error between predicted and actual outcome drives plasticity at parallel fiber–Purkinje cell synapses) without waiting for the full sensory feedback loop.
+- Similarly, our surrogate rate predicts how a change in synaptic strength will alter the post-synaptic neuron's output, enabling gradient-based credit assignment through the non-differentiable spike threshold. The surrogate is a **local forward model** of the neuron's input-output mapping, maintained alongside the actual spiking dynamics.
+- The fact that the surrogate is approximate (analytical LIF rate under constant-current assumptions, while the real input is a stochastic, time-varying impulse train) mirrors the inherent imprecision of biological forward models — they are good enough to guide learning, but not exact replicas of the plant.
+
+### 10.7 STDP + REINFORCE: Local Hebbian Learning Gated by Global Neuromodulation
+
+The coexistence of STDP (per-timestep, local, unsupervised) and REINFORCE (per-episode, global, reward-modulated) on the same synapses mirrors a major theme in computational neuroscience:
+
+- **STDP as local correlation detection**: Spike-timing-dependent plasticity is a purely local mechanism — each synapse "measures" the relative timing of its pre- and post-synaptic spikes and adjusts accordingly. This is biologically implemented via NMDA receptor-mediated calcium dynamics and is well-documented in hippocampal and neocortical synapses.
+- **REINFORCE as global modulation**: The reward signal arrives at the synapse as a diffuse, broadcast neuromodulator (dopamine, serotonin, or acetylcholine), carrying information that is not locally available. It cannot tell individual synapses what to do; it can only scale the changes that local mechanisms (STDP, eligibility) have already proposed.
+- **Gating**: In our implementation, STDP proposes weight changes continuously, and REINFORCE applies a multiplicative gating (advantage × eligibility) at episode end. Biologically, dopamine is known to gate plasticity in the striatum: the same cortico-striatal input pattern can produce LTP, LTD, or no change depending on the timing and magnitude of dopamine receptor activation. The interaction between local Hebbian traces and global modulatory signals is considered a cornerstone of biological reinforcement learning.
+
+The observed asymmetry in our system — STDP with $\nu = 10$ produces larger per-step weight changes than REINFORCE with $\eta_{\text{RL}} = 0.01$ — mirrors the biological observation that Hebbian plasticity is the "workhorse" of synaptic change, while neuromodulation plays a modulatory (amplifying, suppressing, or sign-flipping) role on top of it.
+
+### 10.8 Astrocytes as Slow Eligibility Integrators
+
+The astrocyte dynamics in this network — integrating pre-synaptic activity over long timescales ($\alpha = 0.001$, giving an effective time constant of $\sim$1000 timesteps) and modulating neuronal excitability via threshold changes — resonate with emerging views of astrocytes in neuroscience:
+
+- **Slow integration**: Astrocytes are known to integrate synaptic activity over seconds to minutes via calcium signaling, far slower than neuronal dynamics. Our gliotransmitter variable $G$ plays this role: it slowly accumulates evidence of pre-synaptic activity and triggers a calcium event when a threshold is crossed.
+- **Heterosynaptic modulation**: By lowering the spike threshold (increasing excitability) during calcium events, astrocytes effectively broaden the set of neurons that can participate in a given computation. This is conceptually related to **heterosynaptic plasticity**, where glial cells release gliotransmitters (glutamate, ATP, D-serine) that modulate synaptic strength at nearby synapses, independent of their individual pre/post activity.
+- **Eligibility on a slower timescale**: The astrocyte calcium event ($Ca_{\text{duration}} = 100{,}000$ timesteps) creates a very slow "eligibility" window — once a region is activated, it remains excitable for a long time. This could be interpreted as a **homeostatic or meta-learning signal**: astrocytes maintain a slow memory of which regions of the network have been active, biasing future computation toward or away from those regions. In RL terms, this resembles a form of **intrinsic motivation** or **exploration bonus**: recently-active regions become more excitable, encouraging the agent to revisit and refine previously-used pathways.
+
+### 10.9 The Temperature Parameter as Cortical State
+
+The softmax temperature $T$ in the action-selection policy controls exploration vs. exploitation. In biological terms, this maps to **cortical state** — the balance between desynchronized (high T, exploratory, broad neural ensemble activation) and synchronized (low T, exploitative, sparse winner-take-all) cortical dynamics. Acetylcholine and norepinephrine are known to shift cortical state in this way, with high cholinergic tone promoting desynchronization and exploratory behavior. The temperature parameter can thus be viewed as a simplified model of these ascending arousal systems.

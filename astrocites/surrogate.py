@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 
 def impulse_integral(impulse_amplitude, impulse_length, impulse_shape_factor, invert=True):
@@ -84,12 +85,55 @@ def lif_rate_deriv(current, thresh, decay, tc_decay, refrac, eps=1e-8):
 
 def softplus_rate(current, I_theta, scale):
     """Smooth proxy surrogate rate: ``r(I) = softplus(scale * (I - I_theta))``."""
-    return torch.nn.functional.softplus(scale * (current - I_theta))
+    return F.softplus(scale * (current - I_theta))
 
 
 def softplus_rate_deriv(current, I_theta, scale):
     """``dr/dI = scale * sigmoid(scale * (I - I_theta))``."""
     return scale * torch.sigmoid(scale * (current - I_theta))
+
+
+def nmda_calcium(current, I_half, k):
+    """NMDA-mediated calcium level (Mg2+ unblock sigmoid).
+
+        Ca(I) = sigmoid((I - I_half) / k)
+
+    Monotonically increasing from 0 to 1. ``I_half`` is the half-activation
+    current (default: the LIF threshold current ``I_theta``), ``k`` is the slope
+    factor controlling how sharply calcium transitions around threshold.
+    """
+    return torch.sigmoid((current - I_half) / k)
+
+
+def nmda_rate(current, I_half, k, ca_baseline=0.5):
+    """Rate/logit for the NMDA surrogate.
+
+    Defined as the integral of calcium-above-baseline::
+
+        r(I) = k * softplus((I - I_half) / k) - ca_baseline * I
+
+    so that ``r'(I) = Ca(I) - ca_baseline`` (see :func:`nmda_rate_deriv`).
+
+    With ``ca_baseline = 0.5`` and ``I_half = I_theta`` this simplifies to
+    ``r(I) = k * ln(cosh((I - I_theta) / (2k)))`` — a smooth threshold function
+    that is approximately zero below threshold and grows linearly above.
+    """
+    return k * F.softplus((current - I_half) / k) - ca_baseline * current
+
+
+def nmda_rate_deriv(current, I_half, k, ca_baseline=0.5):
+    """Derivative of :func:`nmda_rate`.
+
+        r'(I) = Ca(I) - ca_baseline
+
+    This is **monotonically increasing** (calcium level minus baseline), with a
+    sign change at the current where ``Ca(I) = ca_baseline``. For the default
+    ``ca_baseline = 0.5`` and ``I_half = I_theta``, the sign change occurs
+    exactly at the LIF threshold: subthreshold synapses get negative
+    eligibility (LTD direction), suprathreshold get positive (LTP direction) —
+    a BCM-like calcium threshold mechanism.
+    """
+    return nmda_calcium(current, I_half, k) - ca_baseline
 
 
 def rate_and_deriv(current, kind, params):
@@ -100,16 +144,19 @@ def rate_and_deriv(current, kind, params):
     current : torch.Tensor
         Effective input currents (one per candidate action).
     kind : str
-        ``"lif"`` or ``"softplus"``.
+        ``"lif"``, ``"softplus"``, or ``"nmda"``.
     params : dict
         Keyword arguments forwarded to the chosen surrogate functions.
         For ``"lif"``: ``thresh``, ``decay``, ``tc_decay``, ``refrac``.
         For ``"softplus"``: ``I_theta``, ``scale``.
+        For ``"nmda"``: ``I_half``, ``k``, ``ca_baseline``.
     """
     if kind == "lif":
         return lif_rate(current, **params), lif_rate_deriv(current, **params)
     elif kind == "softplus":
         return softplus_rate(current, **params), softplus_rate_deriv(current, **params)
+    elif kind == "nmda":
+        return nmda_rate(current, **params), nmda_rate_deriv(current, **params)
     else:
         raise ValueError(f"Unknown surrogate kind: {kind!r}")
 
@@ -136,3 +183,20 @@ def build_lif_params(thresh, dt, tc_decay, refrac):
     ``"lif"`` surrogate, computing ``decay`` from ``dt`` and ``tc_decay``."""
     decay = float(torch.exp(torch.tensor(-float(dt) / float(tc_decay))).item())
     return {"thresh": float(thresh), "decay": decay, "tc_decay": float(tc_decay), "refrac": float(refrac)}
+
+
+def build_nmda_params(thresh, dt, tc_decay, k_frac=0.5, ca_baseline=0.5):
+    """Pack neuron constants into the dict expected by the ``"nmda"`` surrogate.
+
+    ``I_half`` defaults to the LIF threshold current ``I_theta = thresh * (1 -
+    decay)``, so calcium half-activation coincides with the spike threshold.
+    ``k`` defaults to ``k_frac * I_theta`` (slope factor). ``ca_baseline``
+    defaults to 0.5 (sign change at threshold).
+    """
+    decay = float(torch.exp(torch.tensor(-float(dt) / float(tc_decay))).item())
+    I_theta = float(thresh) * (1.0 - decay)
+    return {
+        "I_half": I_theta,
+        "k": k_frac * I_theta,
+        "ca_baseline": ca_baseline,
+    }

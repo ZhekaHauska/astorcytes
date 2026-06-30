@@ -245,6 +245,13 @@ def run_experiment(config: dict, logger: ExperimentLogger = None):
             "I_theta": surr_cfg.get("I_theta", I_theta_default),
             "scale": surr_cfg.get("scale", 1.0),
         }
+    elif surrogate_kind == "nmda":
+        I_theta_default = thresh * (1.0 - float(np.exp(-dt / 150.0)))
+        surrogate_params = {
+            "I_half": surr_cfg.get("I_half", I_theta_default),
+            "k": surr_cfg.get("k", 0.5 * I_theta_default),
+            "ca_baseline": surr_cfg.get("ca_baseline", 0.5),
+        }
     else:
         raise ValueError(f"Unknown surrogate type: {surrogate_kind!r}")
 

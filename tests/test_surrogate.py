@@ -10,8 +10,12 @@ from astrocites.surrogate import (
     lif_rate_deriv,
     softplus_rate,
     softplus_rate_deriv,
+    nmda_calcium,
+    nmda_rate,
+    nmda_rate_deriv,
     eligibility_gradient,
     build_lif_params,
+    build_nmda_params,
 )
 
 
@@ -112,9 +116,13 @@ def test_softplus_rate_deriv_autograd():
 # 4. Full eligibility gradient: closed form vs. autograd on log softmax
 # ---------------------------------------------------------------------------
 
+NMDA_PARAMS = dict(I_half=0.0465, k=0.0233, ca_baseline=0.5)
+
+
 @pytest.mark.parametrize("kind, params", [
     ("lif", LIF_PARAMS),
     ("softplus", dict(I_theta=0.05, scale=2.0)),
+    ("nmda", NMDA_PARAMS),
 ])
 def test_eligibility_gradient_autograd(kind, params):
     torch.manual_seed(0)
@@ -134,8 +142,10 @@ def test_eligibility_gradient_autograd(kind, params):
     # Autograd reference: d/dw log softmax(r(c*w)/T)[chosen_idx]
     if kind == "lif":
         r = lif_rate(I_eff, **params)
-    else:
+    elif kind == "softplus":
         r = softplus_rate(I_eff, **params)
+    else:
+        r = nmda_rate(I_eff, **params)
     log_probs = torch.log_softmax(r / temperature, dim=0)
     autograd = torch.autograd.grad(log_probs[chosen_idx], w_slice, create_graph=False)[0]
 
@@ -197,3 +207,66 @@ def test_lif_rate_plausible_counts():
         expected_spikes = (rate * time_steps).item()
         assert expected_spikes > 0, f"Expected spikes for w={w_val} but got 0"
         assert expected_spikes < 100, f"Too many spikes ({expected_spikes}) for w={w_val}"
+
+
+# ---------------------------------------------------------------------------
+# 7. NMDA calcium surrogate: derivative, monotonicity, sign change
+# ---------------------------------------------------------------------------
+
+def test_nmda_rate_deriv_autograd():
+    current = torch.linspace(0.0, 0.15, 80, requires_grad=True)
+    r = nmda_rate(current, **NMDA_PARAMS)
+    autograd_grad = torch.autograd.grad(r.sum(), current, create_graph=False)[0]
+    manual_grad = nmda_rate_deriv(current.detach(), **NMDA_PARAMS)
+    assert torch.allclose(autograd_grad, manual_grad, rtol=1e-5, atol=1e-6)
+
+
+def test_nmda_calcium_is_sigmoid():
+    I_half = NMDA_PARAMS["I_half"]
+    k = NMDA_PARAMS["k"]
+    ca_at_half = nmda_calcium(torch.tensor([I_half]), I_half, k)
+    assert abs(ca_at_half.item() - 0.5) < 1e-6
+
+
+def test_nmda_rate_deriv_monotonically_increasing():
+    current = torch.linspace(0.0, 0.15, 200)
+    rprime = nmda_rate_deriv(current, **NMDA_PARAMS)
+    diffs = rprime[1:] - rprime[:-1]
+    assert (diffs >= -1e-6).all(), "nmda_rate_deriv should be monotonically non-decreasing"
+
+
+def test_nmda_rate_deriv_sign_change_at_threshold():
+    I_half = NMDA_PARAMS["I_half"]
+    below = nmda_rate_deriv(torch.tensor([I_half * 0.5]), **NMDA_PARAMS)
+    at = nmda_rate_deriv(torch.tensor([I_half]), **NMDA_PARAMS)
+    above = nmda_rate_deriv(torch.tensor([I_half * 2.0]), **NMDA_PARAMS)
+    assert below.item() < 0, "Should be negative below threshold (LTD)"
+    assert abs(at.item()) < 1e-6, "Should be ~zero at threshold (Ca=ca_baseline)"
+    assert above.item() > 0, "Should be positive above threshold (LTP)"
+
+
+def test_nmda_rate_smooth_threshold():
+    """Rate should be ~0 below threshold and growing above it."""
+    I_half = NMDA_PARAMS["I_half"]
+    r_below = nmda_rate(torch.tensor([I_half * 0.1]), **NMDA_PARAMS).item()
+    r_at = nmda_rate(torch.tensor([I_half]), **NMDA_PARAMS).item()
+    r_above = nmda_rate(torch.tensor([I_half * 2.0]), **NMDA_PARAMS).item()
+    assert abs(r_below) < 0.01, "Rate should be ~0 well below threshold"
+    assert r_at < r_above, "Rate should increase through threshold"
+
+
+def test_build_nmda_params():
+    p = build_nmda_params(thresh=7.0, dt=1.0, tc_decay=150.0)
+    decay = float(torch.exp(torch.tensor(-1.0 / 150.0)).item())
+    I_theta = 7.0 * (1.0 - decay)
+    assert abs(p["I_half"] - I_theta) < 1e-10
+    assert abs(p["k"] - 0.5 * I_theta) < 1e-10
+    assert p["ca_baseline"] == 0.5
+
+
+def test_build_nmda_params_custom():
+    p = build_nmda_params(thresh=7.0, dt=1.0, tc_decay=150.0, k_frac=0.3, ca_baseline=0.3)
+    decay = float(torch.exp(torch.tensor(-1.0 / 150.0)).item())
+    I_theta = 7.0 * (1.0 - decay)
+    assert abs(p["k"] - 0.3 * I_theta) < 1e-10
+    assert p["ca_baseline"] == 0.3
