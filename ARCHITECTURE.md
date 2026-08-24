@@ -354,14 +354,14 @@ The score function $(\mathbb{1}[a=a^*] - \pi(a))$ is retained for credit assignm
 
 **Tradeoffs vs surrogate modes:**
 
-| Property | Surrogate (`lif`, `nmda`, ...) | Spike-based |
-|----------|-------------------------------|-------------|
-| Eligibility signal | Analytical $\hat{r}'(I) \cdot c$ | Empirical $n_a / \text{time\_steps}$ |
+| Property                   | Surrogate (`lif`, `nmda`, ...)         | Spike-based                                               |
+| -------------------------- | -------------------------------------- | --------------------------------------------------------- |
+| Eligibility signal         | Analytical $\hat{r}'(I) \cdot c$       | Empirical $n_a / \text{time\_steps}$                      |
 | Captures full SNN dynamics | No (first-order $I_{\text{eff}}$ only) | **Yes** (impulse waveform, refrac, astrocyte, inhibition) |
-| Differentiable w.r.t. $w$ | Yes | No |
-| Policy gradient guarantee | Yes | No (score-weighted Hebbian) |
-| Subthreshold synapses | Can strengthen silent synapses | Cannot (zero spikes → zero eligibility) |
-| Extra computation | Surrogate formula | None (spikes already computed) |
+| Differentiable w.r.t. $w$  | Yes                                    | No                                                        |
+| Policy gradient guarantee  | Yes                                    | No (score-weighted Hebbian)                               |
+| Subthreshold synapses      | Can strengthen silent synapses         | Cannot (zero spikes → zero eligibility)                   |
+| Extra computation          | Surrogate formula                      | None (spikes already computed)                            |
 
 The spike-based mode is the most bio-plausible option — the eligibility signal IS the post-synaptic activity, gated by the score function for credit assignment. It captures all network dynamics (including astrocyte modulation, inhibition, refractory effects) that the analytical $I_{\text{eff}}$ approximation ignores. However, it cannot reinforce synapses whose neurons did not fire ($n_a = 0 \Rightarrow \text{eligibility} = 0$), limiting its ability to discover new pathways.
 
