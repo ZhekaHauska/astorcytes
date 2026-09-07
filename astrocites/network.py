@@ -6,28 +6,30 @@ class NetworkMonitor:
         self.network = network
         self.state_vars = state_vars
         self.recording = {}
+        self._targets = None
         self.reset_()
 
-    def record(self):
-        for var in self.state_vars:
-            for name, layer in self.network.layers.items():
+    def _build_targets(self):
+        targets = []
+        for name, layer in self.network.layers.items():
+            for var in self.state_vars:
                 if hasattr(layer, var):
-                    if name not in self.recording:
-                        self.recording[name] = {}
-                    if var not in self.recording[name]:
-                        self.recording[name][var] = []
-                    data = getattr(layer, var)
-                    if var == 's':
-                        data = data.float()
-                    self.recording[name][var].append(data.detach().clone())
-            for conn_key, conn in self.network.connections.items():
+                    targets.append((name, layer, var))
+        for conn_key, conn in self.network.connections.items():
+            for var in self.state_vars:
                 if hasattr(conn, var):
-                    if conn_key not in self.recording:
-                        self.recording[conn_key] = {}
-                    if var not in self.recording[conn_key]:
-                        self.recording[conn_key][var] = []
-                    data = getattr(conn, var)
-                    self.recording[conn_key][var].append(data.detach().clone())
+                    targets.append((conn_key, conn, var))
+        self._targets = targets
+
+    def record(self):
+        if self._targets is None:
+            self._build_targets()
+        recording = self.recording
+        for name, obj, var in self._targets:
+            data = getattr(obj, var)
+            if var == 's':
+                data = data.float()
+            recording.setdefault(name, {}).setdefault(var, []).append(data.detach().clone())
 
     def get(self):
         result = {}
@@ -88,29 +90,46 @@ class Network(torch.nn.Module):
     def run(self, inpts, time, injects_v=None, current_position=None, adjacent_positions=None, conn_XY=None, enable_stdp=True, **kwargs):
         timesteps = int(time / self.dt)
         injects_v = injects_v or {}
+        layer_items = list(self.layers.items())
+        # resolve connection routing once instead of re-parsing keys every timestep
+        routes = []
+        for conn_key, connection in self.connections.items():
+            parts = conn_key.split('_')
+            if len(parts) >= 2 and parts[1] in self.layers:
+                routes.append((connection, self.layers[parts[0]], parts[1]))
+        # input buffers are reused across timesteps; layers never mutate their input
+        current_inpts = {name: torch.zeros(self.batch_size, *layer.shape) for name, layer in layer_items}
         for t_step in range(timesteps):
-            current_inpts = self._get_inputs()
+            for buf in current_inpts.values():
+                buf.zero_()
+            for connection, source_layer, tgt in routes:
+                source_output = connection.compute(source_layer.s)
+                if source_output.dim() == 1:
+                    source_output = source_output.unsqueeze(0)
+                current_inpts[tgt] += source_output
             for layer_name, input_data in inpts.items():
                 if layer_name in current_inpts:
                     if len(input_data.shape) == 3:
                         current_inpts[layer_name] += input_data[t_step]
                     else:
                         current_inpts[layer_name] += input_data
-            for name, layer in self.layers.items():
-                if name in current_inpts:
-                    if name in injects_v:
-                        inject_voltage = injects_v[name]
-                        if len(inject_voltage.shape) == 1:
-                            layer.v += inject_voltage
-                        else:
-                            layer.v += inject_voltage[t_step]
-                    if name in ['Y', 'I']:
-                        layer.forward(current_inpts[name], current_position=current_position, adjacent_positions=adjacent_positions)
+            for name, layer in layer_items:
+                if name in injects_v:
+                    inject_voltage = injects_v[name]
+                    if len(inject_voltage.shape) == 1:
+                        layer.v += inject_voltage
                     else:
-                        layer.forward(current_inpts[name])
-            for connection in self.connections.values():
-                connection.target.prev_layer_s = connection.source.s
-                if connection == conn_XY:
+                        layer.v += inject_voltage[t_step]
+                if name in ['Y', 'I']:
+                    layer.forward(current_inpts[name], current_position=current_position, adjacent_positions=adjacent_positions)
+                else:
+                    layer.forward(current_inpts[name])
+            for connection, source_layer, _tgt in routes:
+                if getattr(connection.target, 'enable_astrocyte', False):
+                    # clone: layer spike buffers are reused across timesteps, but the
+                    # astrocyte must see the spikes as of when they were stored
+                    connection.target.__dict__['prev_layer_s'] = source_layer.s.clone()
+                if connection is conn_XY:
                     if enable_stdp:
                         connection.update(current_position=current_position,
                                           adjacent_positions=adjacent_positions,

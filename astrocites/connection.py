@@ -34,6 +34,16 @@ class Connection(torch.nn.Module):
         self.register_buffer("a_pre", torch.zeros(source.n))
         self.register_buffer("impulse_state", torch.zeros(source.n))
         self.register_buffer("eligibility", torch.zeros(source.n, target.n))
+        # impulse_curve is a pure function of the integer impulse state (0..impulse_length),
+        # so evaluate it once for every possible state and gather at runtime
+        states = torch.arange(int(impulse_length) + 1, dtype=torch.float)
+        saved_state = self._buffers["impulse_state"]
+        self._buffers["impulse_state"] = states
+        try:
+            lut = self.impulse_curve().clone()
+        finally:
+            self._buffers["impulse_state"] = saved_state
+        self.register_buffer("impulse_lut", lut)
         self.baseline_decay = baseline_decay
         self.policy_mix_beta = policy_mix_beta
         self.gamma = gamma
@@ -59,14 +69,15 @@ class Connection(torch.nn.Module):
             return impulse
 
     def update_impulse_state(self, s):
-        self.impulse_state += (self.impulse_state > 0).float()
-        s_modified = s.clone()
-        if len(s_modified.shape) == 1:
-            s_modified = s_modified.unsqueeze(0)
-        s_modified[:, self.impulse_state > 0] = 0
-        self.impulse_state += (self.impulse_state == 0).float() * s_modified.float().view(-1)
-        impulse = self.impulse_curve()
-        self.impulse_state *= (self.impulse_state < self.impulse_length).float()
+        st = self.impulse_state
+        active = st > 0
+        st += active.float()
+        if s.dim() == 1:
+            s = s.unsqueeze(0)
+        # new impulses only start where none is in progress; s is never mutated here
+        st += (active == 0).float() * s.float().view(-1)
+        impulse = self.impulse_lut[st.long()]
+        st *= (st < self.impulse_length).float()
         return impulse
 
     def compute(self, s: torch.Tensor) -> torch.Tensor:

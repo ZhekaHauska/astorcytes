@@ -52,31 +52,39 @@ class WeightDependentPostPre(LearningRule):
             first_index = 100
         return self.STDP_base[first_index][second_index]
 
+    def _stdp_lookup(self, weight, delta):
+        """Vectorized table lookup equivalent to per-element delta_w_custom_single."""
+        delta = torch.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0)
+        first = torch.round(weight / self.nu[0] * 100).long().abs().clamp(max=100)
+        second = (delta.double() + 60).long()
+        second = torch.where((second > 120) | (second < 0), torch.zeros_like(second), second)
+        return self.STDP_base[first, second]
+
     def update(self, current_position=None, adjacent_positions=None, **kwargs):
-        batch_size = self.connection.source.batch_size
         if current_position is not None and adjacent_positions is not None:
-            update = torch.zeros_like(self.connection.w)
-            source_s_current = self.connection.source.s[:, current_position].unsqueeze(1).unsqueeze(2).float()
-            source_x_current = self.connection.source.x[:, current_position].unsqueeze(1).unsqueeze(2)
-            for post_idx in adjacent_positions:
-                target_s_adj = self.connection.target.s[:, post_idx].unsqueeze(1).unsqueeze(1).float()
-                target_x_adj = self.connection.target.x_neg[:, post_idx].unsqueeze(1).unsqueeze(1)
-                outer_product_pre = self.reduction(torch.bmm(source_s_current, target_x_adj), dim=0)
-                outer_product_pre = torch.clamp(outer_product_pre, min=1e-10)
-                delta_pre = self.tc_trace_neg * torch.log(outer_product_pre)
-                update_pre_val = self.nu[0] * self.delta_w_custom_single(
-                    self.connection.w[current_position, post_idx], delta_pre[0, 0])
-                update[current_position, post_idx] += update_pre_val
-                outer_product_post = self.reduction(torch.bmm(source_x_current, target_s_adj), dim=0)
-                outer_product_post = torch.clamp(outer_product_post, min=1e-10)
-                delta_post = -self.tc_trace * torch.log(outer_product_post)
-                update_post_val = self.nu[1] * self.delta_w_custom_single(
-                    self.connection.w[current_position, post_idx], delta_post[0, 0])
-                update[current_position, post_idx] += update_post_val
-                decay_factor = self.reduction(torch.bmm(torch.ones_like(source_x_current), target_s_adj), dim=0)
-                update[current_position, post_idx] += (-self.post_spike_weight_decay) * self.connection.w[current_position, post_idx] * decay_factor[0, 0]
-            self.connection.w += update
+            conn = self.connection
+            adj = torch.as_tensor(adjacent_positions, dtype=torch.long)
+            w_adj = conn.w[current_position, adj]
+            source_s = conn.source.s[:, current_position].float().unsqueeze(1).unsqueeze(2)
+            source_x = conn.source.x[:, current_position].unsqueeze(1).unsqueeze(2)
+            target_s = conn.target.s[:, adj].float().unsqueeze(1)
+            target_x = conn.target.x_neg[:, adj].unsqueeze(1)
+
+            outer_product_pre = self.reduction(torch.bmm(source_s, target_x), dim=0).view(-1)
+            outer_product_pre = torch.clamp(outer_product_pre, min=1e-10)
+            delta_pre = self.tc_trace_neg * torch.log(outer_product_pre)
+            update = self.nu[0] * self._stdp_lookup(w_adj, delta_pre)
+
+            outer_product_post = self.reduction(torch.bmm(source_x, target_s), dim=0).view(-1)
+            outer_product_post = torch.clamp(outer_product_post, min=1e-10)
+            delta_post = -self.tc_trace * torch.log(outer_product_post)
+            update = update + self.nu[1] * self._stdp_lookup(w_adj, delta_post)
+
+            decay_factor = self.reduction(torch.bmm(torch.ones_like(source_x), target_s), dim=0).view(-1)
+            update = update + (-self.post_spike_weight_decay) * w_adj * decay_factor
+            conn.w.data[current_position, adj] += update
         else:
+            batch_size = self.connection.source.batch_size
             source_s = self.connection.source.s.view(batch_size, -1).unsqueeze(2).float()
             source_x = self.connection.source.x.view(batch_size, -1).unsqueeze(2)
             target_s = self.connection.target.s.view(batch_size, -1).unsqueeze(1).float()

@@ -17,6 +17,8 @@ class Nodes(torch.nn.Module):
         if traces:
             self.register_buffer("x", torch.zeros(1, *self.shape))
             self.register_buffer("x_neg", torch.zeros(1, *self.shape))
+            self.register_buffer("trace_decay_pre", torch.exp(-1.0 / self.tc_trace))
+            self.register_buffer("trace_decay_neg", torch.exp(-1.0 / self.tc_trace_neg))
         else:
             self.x = None
             self.x_neg = None
@@ -24,10 +26,12 @@ class Nodes(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> None:
         if self.traces:
-            decay_factor_pre = torch.exp(-1.0 / self.tc_trace)
-            decay_factor_post = torch.exp(-1.0 / self.tc_trace_neg)
-            self.x = self.x * decay_factor_pre + self.trace_scale * self.s.float()
-            self.x_neg = self.x_neg * decay_factor_post + self.trace_scale * self.s.float()
+            if self.trace_scale == 1.0:
+                s_f = self.s.float()
+            else:
+                s_f = self.s.float() * self.trace_scale
+            self.x.mul_(self.trace_decay_pre).add_(s_f)
+            self.x_neg.mul_(self.trace_decay_neg).add_(s_f)
 
     def reset_(self) -> None:
         self.s.zero_()
@@ -56,10 +60,14 @@ class Input(Nodes):
     def forward(self, x: torch.Tensor) -> None:
         if x.dim() == 1:
             x = x.unsqueeze(0)
-        batch_size, n_neurons = x.shape
         max_val, neuron_idx = torch.max(x[0], 0)
-        self.s = torch.zeros_like(x, dtype=torch.bool)
-        self.refrac_count = (self.refrac_count > 0).float() * (self.refrac_count - 1.0)
+        if self.s.shape != x.shape:
+            self.s = torch.zeros_like(x, dtype=torch.bool)
+        else:
+            self.s.zero_()
+        refrac_active = self.refrac_count > 0
+        self.refrac_count.sub_(1.0)
+        self.refrac_count.mul_(refrac_active.float())
         if max_val > 0:
             batch_idx = 0
             if self.refrac_count[batch_idx, neuron_idx] == 0:
@@ -102,53 +110,77 @@ class LIFNodes(Nodes):
         self.G_thr = 0.2
         self.Ca_duration = 1000 * 100
         self.prev_layer_s = None
+        # (position, adjacency) -> active neuron indices; rebuilt only when the
+        # navigation step changes, reused across the timestep loop
+        self._idx_cache = (None, None)
 
     def astrocyte_input(self):
-        response = torch.ones_like(self.thresh)
         if self.prev_layer_s is not None:
             if self.prev_layer_s.dim() > 1:
                 prev_s_flat = self.prev_layer_s.view(-1, self.n).float().mean(dim=0)
             else:
                 prev_s_flat = self.prev_layer_s.float()
-            self.G = self.G - self.dt * (self.alpha * self.G - self.k * prev_s_flat)
-        activated_neurons = self.G > self.G_thr
-        self.Ca[activated_neurons] = self.Ca_duration
-        self.Ca = torch.clamp(self.Ca - 1, min=0)
-        imp_astro = torch.zeros_like(self.thresh)
-        active_effect = self.Ca > 0
-        imp_astro[active_effect] = 5
-        response = response / (1 + imp_astro)
-        return response
+            self.G.sub_(self.dt * (self.alpha * self.G - self.k * prev_s_flat))
+        self.Ca[self.G > self.G_thr] = self.Ca_duration
+        self.Ca.sub_(1.0)
+        self.Ca.clamp_(min=0)
+        return 1.0 / (1.0 + 5.0 * (self.Ca > 0).float())
 
     def forward(self, x: torch.Tensor, current_position: int = None, adjacent_positions: list = None) -> None:
         if x.dim() == 1:
             x = x.unsqueeze(0)
-        batch_size, n_neurons = x.shape
         if self.enable_astrocyte:
-            self.thresh = self.initial_thresh * self.astrocyte_input()
-        active_neurons = set()
-        if current_position is not None:
-            active_neurons.add(current_position)
-        if adjacent_positions is not None:
-            active_neurons.update(adjacent_positions)
-        if not active_neurons:
-            active_neurons = set(range(n_neurons))
-        active_mask = torch.zeros(n_neurons, dtype=torch.bool, device=self.v.device)
-        for idx in active_neurons:
-            active_mask[idx] = True
-        self.s = torch.zeros_like(x, dtype=torch.bool)
-        self.v[:, active_mask] = self.decay * (self.v[:, active_mask] - self.rest) + self.rest
-        self.refrac_count[:, active_mask] = (self.refrac_count[:, active_mask] > 0).float() * (self.refrac_count[:, active_mask] - self.dt)
-        for neuron_idx in active_neurons:
-            refrac_mask = self.refrac_count[:, neuron_idx] == 0
-            self.v[:, neuron_idx] += refrac_mask.float() * x[:, neuron_idx]
-            spike_mask = self.v[:, neuron_idx] >= self.thresh[neuron_idx]
-            self.s[:, neuron_idx] = spike_mask
-            if spike_mask.any():
-                self.refrac_count[:, neuron_idx][spike_mask] = self.refrac
-                self.v[:, neuron_idx][spike_mask] = self.reset
+            self.thresh.copy_(self.initial_thresh * self.astrocyte_input())
+        if current_position is None and adjacent_positions is None:
+            idx_tensor = None
+        else:
+            key = (current_position,
+                   tuple(adjacent_positions) if adjacent_positions is not None else None)
+            if self._idx_cache[0] == key:
+                idx_tensor = self._idx_cache[1]
+            else:
+                idx = [] if current_position is None else [current_position]
+                if adjacent_positions is not None:
+                    idx.extend(adjacent_positions)
+                idx = list(dict.fromkeys(idx))
+                idx_tensor = (torch.as_tensor(idx, dtype=torch.long, device=self.v.device)
+                              if idx else None)
+                self._idx_cache = (key, idx_tensor)
+
+        if self.s.shape != x.shape:
+            self.s = torch.zeros_like(x, dtype=torch.bool)
+        else:
+            self.s.zero_()
+
+        if idx_tensor is None:
+            v = self.v
+            rc = self.refrac_count
+            x_act = x
+            thresh = self.thresh
+        else:
+            v = self.v[:, idx_tensor]
+            rc = self.refrac_count[:, idx_tensor]
+            x_act = x[:, idx_tensor]
+            thresh = self.thresh[idx_tensor] if self.thresh.dim() > 0 else self.thresh
+
+        v = self.decay * (v - self.rest) + self.rest
+        rc = (rc > 0).float() * (rc - self.dt)
+        rc_free = rc == 0
+        v = v + rc_free.float() * x_act
+        spike = v >= thresh
+        rc = torch.where(spike, self.refrac, rc)
+        v = torch.where(spike, self.reset, v)
         if self.lbound is not None:
-            self.v[:, active_mask] = torch.where(self.v[:, active_mask] < self.lbound, self.lbound, self.v[:, active_mask])
+            v = v.clamp_min(self.lbound)
+
+        if idx_tensor is None:
+            self.v.copy_(v)
+            self.refrac_count.copy_(rc)
+            self.s.copy_(spike)
+        else:
+            self.v[:, idx_tensor] = v
+            self.refrac_count[:, idx_tensor] = rc
+            self.s[:, idx_tensor] = spike
         super().forward(x)
 
     def reset_(self) -> None:
